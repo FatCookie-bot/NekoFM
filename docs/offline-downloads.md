@@ -116,6 +116,9 @@ Current export behavior:
 - Exports write `NekoFM_All_Downloads.m3u`.
 - Exports also write `Liked.m3u` when liked songs are downloaded locally.
 - M3U entries use relative paths so the exported folder can be moved to an SD card or USB drive.
+- If two exported songs would use the same filename, the later file gets its track id appended instead of overwriting the first.
+- Exports write a hidden `.nekofm_export_manifest.json` so future clean exports know which old files NekoFM created.
+- When exporting into a folder with an existing NekoFM export, the app asks whether to update in place or clean previous NekoFM export files first.
 - Exports never move, delete, or rewrite app-managed downloads.
 
 ## Liked Playlist

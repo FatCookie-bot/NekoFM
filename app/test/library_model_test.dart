@@ -489,6 +489,7 @@ void main() {
     expect(result.exportedTrackCount, 1);
     expect(result.copiedCoverCount, 1);
     expect(result.skippedTrackCount, 0);
+    expect(result.collisionCount, 0);
     expect(await exportedAudio.readAsBytes(), [1, 2, 3, 4]);
     expect(await exportedCover.readAsBytes(), [5, 6, 7]);
     expect(playlistText, contains('#EXTM3U'));
@@ -566,6 +567,75 @@ void main() {
   });
 
   test(
+    'export avoids overwriting tracks with matching visible metadata',
+    () async {
+      final tempRoot = await Directory.systemTemp.createTemp(
+        'nekofm_export_collision_',
+      );
+      addTearDown(() async {
+        if (await tempRoot.exists()) {
+          await tempRoot.delete(recursive: true);
+        }
+      });
+
+      final sourceDirectory = Directory('${tempRoot.path}/source');
+      await sourceDirectory.create(recursive: true);
+      final firstAudio = File('${sourceDirectory.path}/first.flac');
+      final secondAudio = File('${sourceDirectory.path}/second.flac');
+      await firstAudio.writeAsBytes([1, 1, 1]);
+      await secondAudio.writeAsBytes([2, 2, 2]);
+
+      final targetRoot = Directory('${tempRoot.path}/export');
+      final result = await const MusicExporter().exportDownloads(
+        targetRoot: targetRoot,
+        downloads: [
+          DownloadedTrack(
+            trackId: 'first-id',
+            title: 'Same Song',
+            artist: 'Same Artist',
+            trackNumber: 1,
+            durationSeconds: 10,
+            localPath: firstAudio.path,
+            state: DownloadState.complete,
+            updatedAt: DateTime(2026, 5, 17),
+            albumName: 'Same Album',
+            suffix: 'flac',
+            bytes: 3,
+          ),
+          DownloadedTrack(
+            trackId: 'second-id',
+            title: 'Same Song',
+            artist: 'Same Artist',
+            trackNumber: 1,
+            durationSeconds: 10,
+            localPath: secondAudio.path,
+            state: DownloadState.complete,
+            updatedAt: DateTime(2026, 5, 17),
+            albumName: 'Same Album',
+            suffix: 'flac',
+            bytes: 3,
+          ),
+        ],
+      );
+
+      final preferredFile = File(
+        '${targetRoot.path}/Same_Artist/Same_Album/01_-_Same_Song.flac',
+      );
+      final collisionFile = File(
+        '${targetRoot.path}/Same_Artist/Same_Album/01_-_Same_Song_-_second-id.flac',
+      );
+      final playlistText = await File(result.playlistPath).readAsString();
+
+      expect(result.exportedTrackCount, 2);
+      expect(result.collisionCount, 1);
+      expect(await preferredFile.readAsBytes(), [1, 1, 1]);
+      expect(await collisionFile.readAsBytes(), [2, 2, 2]);
+      expect(playlistText, contains('01_-_Same_Song.flac'));
+      expect(playlistText, contains('01_-_Same_Song_-_second-id.flac'));
+    },
+  );
+
+  test(
     'library export includes liked m3u when liked downloads exist',
     () async {
       final tempRoot = await Directory.systemTemp.createTemp(
@@ -633,6 +703,84 @@ void main() {
       expect(likedPlaylistText, isNot(contains('Other_Song.flac')));
     },
   );
+
+  test('clean export removes only previous NekoFM manifest files', () async {
+    final tempRoot = await Directory.systemTemp.createTemp(
+      'nekofm_export_clean_',
+    );
+    addTearDown(() async {
+      if (await tempRoot.exists()) {
+        await tempRoot.delete(recursive: true);
+      }
+    });
+
+    final sourceDirectory = Directory('${tempRoot.path}/source');
+    await sourceDirectory.create(recursive: true);
+    final oldAudio = File('${sourceDirectory.path}/old.flac');
+    final newAudio = File('${sourceDirectory.path}/new.flac');
+    await oldAudio.writeAsBytes([1]);
+    await newAudio.writeAsBytes([2]);
+
+    final targetRoot = Directory('${tempRoot.path}/export');
+    final exporter = const MusicExporter();
+    await exporter.exportLibrary(
+      targetRoot: targetRoot,
+      downloads: [
+        DownloadedTrack(
+          trackId: 'old',
+          title: 'Old Song',
+          artist: 'Artist',
+          trackNumber: 1,
+          durationSeconds: 10,
+          localPath: oldAudio.path,
+          state: DownloadState.complete,
+          updatedAt: DateTime(2026, 5, 17),
+          albumName: 'Album',
+          suffix: 'flac',
+          bytes: 1,
+        ),
+      ],
+    );
+    final unrelatedFile = File('${targetRoot.path}/do-not-touch.txt');
+    await unrelatedFile.writeAsString('mine');
+
+    expect(await exporter.hasExistingExport(targetRoot), isTrue);
+
+    await exporter.exportLibrary(
+      targetRoot: targetRoot,
+      cleanFirst: true,
+      downloads: [
+        DownloadedTrack(
+          trackId: 'new',
+          title: 'New Song',
+          artist: 'Artist',
+          trackNumber: 2,
+          durationSeconds: 10,
+          localPath: newAudio.path,
+          state: DownloadState.complete,
+          updatedAt: DateTime(2026, 5, 17),
+          albumName: 'Album',
+          suffix: 'flac',
+          bytes: 1,
+        ),
+      ],
+    );
+
+    final oldExport = File(
+      '${targetRoot.path}/Artist/Album/01_-_Old_Song.flac',
+    );
+    final newExport = File(
+      '${targetRoot.path}/Artist/Album/02_-_New_Song.flac',
+    );
+    final manifest = File(
+      '${targetRoot.path}/${MusicExporter.manifestFilename}',
+    );
+
+    expect(await oldExport.exists(), isFalse);
+    expect(await newExport.readAsBytes(), [2]);
+    expect(await unrelatedFile.readAsString(), 'mine');
+    expect(await manifest.exists(), isTrue);
+  });
 
   test('searches downloaded album metadata offline', () async {
     SharedPreferencesAsyncPlatform.instance =

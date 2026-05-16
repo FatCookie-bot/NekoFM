@@ -125,6 +125,12 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
       return;
     }
 
+    final targetRoot = Directory(path);
+    final exportMode = await _chooseExportMode(targetRoot);
+    if (exportMode == null || !mounted) {
+      return;
+    }
+
     setState(() {
       _isExporting = true;
       _exportMessage = null;
@@ -133,8 +139,9 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
     try {
       final result = await _exporter.exportLibrary(
         downloads: completeDownloads,
-        targetRoot: Directory(path),
+        targetRoot: targetRoot,
         likedTrackIds: likedTrackIds,
+        cleanFirst: exportMode == _ExportMode.clean,
       );
       if (!mounted) {
         return;
@@ -143,7 +150,7 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
       setState(() {
         _isExporting = false;
         _exportMessage =
-            'Exported ${result.allDownloads.exportedTrackCount} tracks, ${result.allDownloads.copiedCoverCount} covers, and ${result.allDownloads.skippedTrackCount} skipped. ${result.liked == null ? 'No downloaded liked songs for Liked.m3u.' : 'Liked.m3u included.'}';
+            'Exported ${result.allDownloads.exportedTrackCount} tracks, ${result.allDownloads.copiedCoverCount} covers, ${result.allDownloads.skippedTrackCount} skipped, and ${result.allDownloads.collisionCount} filename fixes. ${result.liked == null ? 'No downloaded liked songs for Liked.m3u.' : 'Liked.m3u included.'}';
       });
     } on Object catch (error) {
       if (!mounted) {
@@ -155,6 +162,43 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
         _exportMessage = 'Export failed: $error';
       });
     }
+  }
+
+  Future<_ExportMode?> _chooseExportMode(Directory targetRoot) async {
+    if (!await _exporter.hasExistingExport(targetRoot)) {
+      return _ExportMode.update;
+    }
+
+    if (!mounted) {
+      return null;
+    }
+
+    return showDialog<_ExportMode>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Existing NekoFM export found'),
+          content: const Text(
+            'Update keeps extra old files. Clean removes files from the previous NekoFM export manifest before copying the current export.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(_ExportMode.update),
+              child: const Text('Update export'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(_ExportMode.clean),
+              icon: const Icon(Icons.cleaning_services_outlined),
+              label: const Text('Clean export'),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   List<DownloadedTrack> _completeDownloads(List<DownloadedTrack> downloads) {
@@ -185,6 +229,8 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
         );
   }
 }
+
+enum _ExportMode { update, clean }
 
 class _DownloadsToolbar extends StatelessWidget {
   const _DownloadsToolbar({
