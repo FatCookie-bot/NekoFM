@@ -11,6 +11,7 @@ import '../../core/library/album_detail.dart';
 import '../../core/library/library_search_result.dart';
 import '../../core/library/music_library_repository.dart';
 import '../../core/library/track.dart';
+import '../../core/likes/liked_controller.dart';
 import '../../core/player/player_controller.dart';
 import '../player/album_art.dart';
 
@@ -40,6 +41,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
     super.initState();
     _loadAlbums();
     ref.read(downloadControllerProvider).load();
+    ref.read(likedControllerProvider).load();
   }
 
   @override
@@ -52,20 +54,25 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
   @override
   Widget build(BuildContext context) {
     final downloads = ref.read(downloadControllerProvider);
+    final liked = ref.read(likedControllerProvider);
+    final player = ref.read(playerControllerProvider);
     if (_selectedAlbum != null) {
       return ListenableBuilder(
-        listenable: downloads,
+        listenable: Listenable.merge([downloads, liked, player]),
         builder: (context, _) {
           return _AlbumDetailView(
             album: _selectedAlbum!,
             albumDetailFuture: _albumDetailFuture!,
             downloads: downloads,
+            liked: liked,
+            player: player,
             onBack: _clearSelectedAlbum,
             onRetry: () => _openAlbum(_selectedAlbum!),
             onPlayTrack: _playTrack,
             onDownloadTrack: downloads.downloadTrack,
-            onDownloadAlbum: downloads.downloadTracks,
             onDeleteTrack: _deleteTrackDownload,
+            onToggleLiked: liked.toggleTrack,
+            onDownloadAlbum: downloads.downloadTracks,
             onDeleteAlbum: _deleteAlbumDownloads,
           );
         },
@@ -73,7 +80,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
     }
 
     return ListenableBuilder(
-      listenable: downloads,
+      listenable: Listenable.merge([downloads, liked, player]),
       builder: (context, _) {
         return Column(
           children: [
@@ -88,6 +95,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
                   ? _AlbumBrowser(
                       albumsFuture: _albumsFuture,
                       isDownloadedLibrary: _isShowingDownloadedLibrary,
+                      player: player,
                       onRefresh: _loadAlbums,
                       onOpenAlbum: _openAlbum,
                     )
@@ -95,10 +103,13 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
                       query: _searchQuery,
                       searchFuture: _searchFuture,
                       downloads: downloads,
+                      liked: liked,
+                      player: player,
                       onOpenAlbum: _openAlbum,
                       onPlayTrack: _playSearchTrack,
                       onDownloadTrack: downloads.downloadTrack,
                       onDeleteTrack: _deleteTrackDownload,
+                      onToggleLiked: liked.toggleTrack,
                     ),
             ),
           ],
@@ -345,12 +356,14 @@ class _AlbumBrowser extends StatelessWidget {
   const _AlbumBrowser({
     required this.albumsFuture,
     required this.isDownloadedLibrary,
+    required this.player,
     required this.onRefresh,
     required this.onOpenAlbum,
   });
 
   final Future<List<Album>>? albumsFuture;
   final bool isDownloadedLibrary;
+  final PlayerController player;
   final VoidCallback onRefresh;
   final ValueChanged<Album> onOpenAlbum;
 
@@ -407,6 +420,7 @@ class _AlbumBrowser extends StatelessWidget {
                     final album = albums[index];
                     return _AlbumTile(
                       album: album,
+                      isPlaying: player.isCurrentAlbum(album.id),
                       onTap: () => onOpenAlbum(album),
                     );
                   },
@@ -453,19 +467,25 @@ class _SearchResultsView extends StatelessWidget {
     required this.query,
     required this.searchFuture,
     required this.downloads,
+    required this.liked,
+    required this.player,
     required this.onOpenAlbum,
     required this.onPlayTrack,
     required this.onDownloadTrack,
     required this.onDeleteTrack,
+    required this.onToggleLiked,
   });
 
   final String query;
   final Future<LibrarySearchResult>? searchFuture;
   final DownloadController downloads;
+  final LikedController liked;
+  final PlayerController player;
   final ValueChanged<Album> onOpenAlbum;
   final ValueChanged<Track> onPlayTrack;
   final ValueChanged<Track> onDownloadTrack;
   final ValueChanged<Track> onDeleteTrack;
+  final ValueChanged<Track> onToggleLiked;
 
   @override
   Widget build(BuildContext context) {
@@ -507,7 +527,11 @@ class _SearchResultsView extends StatelessWidget {
             if (result.albums.isNotEmpty) ...[
               const _ResultSectionHeader(label: 'Albums'),
               for (final album in result.albums)
-                _AlbumTile(album: album, onTap: () => onOpenAlbum(album)),
+                _AlbumTile(
+                  album: album,
+                  isPlaying: player.isCurrentAlbum(album.id),
+                  onTap: () => onOpenAlbum(album),
+                ),
             ],
             if (result.albums.isNotEmpty && result.tracks.isNotEmpty)
               const Divider(height: 24),
@@ -517,11 +541,14 @@ class _SearchResultsView extends StatelessWidget {
                 _SearchTrackTile(
                   track: track,
                   download: downloads.trackState(track.id),
+                  isLiked: liked.isLiked(track.id),
+                  isPlaying: player.isCurrentTrack(track.id),
                   onTap: () => onPlayTrack(track),
                   onDownload: () => onDownloadTrack(track),
                   onDelete: () => _confirmDeleteTrack(context, track, () {
                     onDeleteTrack(track);
                   }),
+                  onToggleLiked: () => onToggleLiked(track),
                 ),
             ],
           ],
@@ -536,10 +563,13 @@ class _AlbumDetailView extends StatelessWidget {
     required this.album,
     required this.albumDetailFuture,
     required this.downloads,
+    required this.liked,
+    required this.player,
     required this.onBack,
     required this.onRetry,
     required this.onPlayTrack,
     required this.onDownloadTrack,
+    required this.onToggleLiked,
     required this.onDownloadAlbum,
     required this.onDeleteTrack,
     required this.onDeleteAlbum,
@@ -548,9 +578,12 @@ class _AlbumDetailView extends StatelessWidget {
   final Album album;
   final Future<AlbumDetail> albumDetailFuture;
   final DownloadController downloads;
+  final LikedController liked;
+  final PlayerController player;
   final VoidCallback onBack;
   final VoidCallback onRetry;
   final ValueChanged<Track> onDownloadTrack;
+  final ValueChanged<Track> onToggleLiked;
   final ValueChanged<List<Track>> onDownloadAlbum;
   final ValueChanged<Track> onDeleteTrack;
   final ValueChanged<List<Track>> onDeleteAlbum;
@@ -658,6 +691,8 @@ class _AlbumDetailView extends StatelessWidget {
                   return _TrackTile(
                     track: track,
                     download: downloads.trackState(track.id),
+                    isLiked: liked.isLiked(track.id),
+                    isPlaying: player.isCurrentTrack(track.id),
                     onTap: () => onPlayTrack(
                       album: album,
                       tracks: tracks,
@@ -667,6 +702,7 @@ class _AlbumDetailView extends StatelessWidget {
                     onDelete: () => _confirmDeleteTrack(context, track, () {
                       onDeleteTrack(track);
                     }),
+                    onToggleLiked: () => onToggleLiked(track),
                   );
                 },
               );
@@ -808,9 +844,14 @@ class _AlbumDownloadState {
 }
 
 class _AlbumTile extends StatelessWidget {
-  const _AlbumTile({required this.album, required this.onTap});
+  const _AlbumTile({
+    required this.album,
+    required this.isPlaying,
+    required this.onTap,
+  });
 
   final Album album;
+  final bool isPlaying;
   final VoidCallback onTap;
 
   @override
@@ -822,17 +863,22 @@ class _AlbumTile extends StatelessWidget {
       _formatDuration(album.durationSeconds),
     ].join(' • ');
 
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-      leading: AlbumArt(
-        imageUri: album.coverArtUri,
-        size: 44,
-        semanticLabel: '${album.name} cover art',
+    return _PlayingTileFrame(
+      isPlaying: isPlaying,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        leading: AlbumArt(
+          imageUri: album.coverArtUri,
+          size: 44,
+          semanticLabel: '${album.name} cover art',
+        ),
+        title: Text(album.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: Icon(
+          isPlaying ? Icons.graphic_eq_outlined : Icons.chevron_right,
+        ),
+        onTap: onTap,
       ),
-      title: Text(album.name, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: const Icon(Icons.chevron_right),
-      onTap: onTap,
     );
   }
 }
@@ -841,16 +887,22 @@ class _TrackTile extends StatelessWidget {
   const _TrackTile({
     required this.track,
     required this.download,
+    required this.isLiked,
+    required this.isPlaying,
     required this.onTap,
     required this.onDownload,
     required this.onDelete,
+    required this.onToggleLiked,
   });
 
   final Track track;
   final DownloadedTrack? download;
+  final bool isLiked;
+  final bool isPlaying;
   final VoidCallback onTap;
   final VoidCallback onDownload;
   final VoidCallback onDelete;
+  final VoidCallback onToggleLiked;
 
   @override
   Widget build(BuildContext context) {
@@ -861,22 +913,27 @@ class _TrackTile extends StatelessWidget {
       if (track.suffix != null) track.suffix!.toUpperCase(),
     ].join(' • ');
 
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-      leading: SizedBox(
-        width: 32,
-        child: Center(
-          child: Text(number, style: Theme.of(context).textTheme.labelLarge),
+    return _PlayingTileFrame(
+      isPlaying: isPlaying,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+        leading: SizedBox(
+          width: 32,
+          child: Center(
+            child: Text(number, style: Theme.of(context).textTheme.labelLarge),
+          ),
         ),
+        title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: _TrackActions(
+          download: download,
+          isLiked: isLiked,
+          onDownload: onDownload,
+          onDelete: onDelete,
+          onToggleLiked: onToggleLiked,
+        ),
+        onTap: onTap,
       ),
-      title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: _TrackActions(
-        download: download,
-        onDownload: onDownload,
-        onDelete: onDelete,
-      ),
-      onTap: onTap,
     );
   }
 }
@@ -885,16 +942,22 @@ class _SearchTrackTile extends StatelessWidget {
   const _SearchTrackTile({
     required this.track,
     required this.download,
+    required this.isLiked,
+    required this.isPlaying,
     required this.onTap,
     required this.onDownload,
     required this.onDelete,
+    required this.onToggleLiked,
   });
 
   final Track track;
   final DownloadedTrack? download;
+  final bool isLiked;
+  final bool isPlaying;
   final VoidCallback onTap;
   final VoidCallback onDownload;
   final VoidCallback onDelete;
+  final VoidCallback onToggleLiked;
 
   @override
   Widget build(BuildContext context) {
@@ -905,21 +968,26 @@ class _SearchTrackTile extends StatelessWidget {
       if (track.suffix != null) track.suffix!.toUpperCase(),
     ].join(' • ');
 
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      leading: AlbumArt(
-        imageUri: track.coverArtUri,
-        size: 44,
-        semanticLabel: '${track.title} cover art',
+    return _PlayingTileFrame(
+      isPlaying: isPlaying,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        leading: AlbumArt(
+          imageUri: track.coverArtUri,
+          size: 44,
+          semanticLabel: '${track.title} cover art',
+        ),
+        title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+        trailing: _TrackActions(
+          download: download,
+          isLiked: isLiked,
+          onDownload: onDownload,
+          onDelete: onDelete,
+          onToggleLiked: onToggleLiked,
+        ),
+        onTap: onTap,
       ),
-      title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: _TrackActions(
-        download: download,
-        onDownload: onDownload,
-        onDelete: onDelete,
-      ),
-      onTap: onTap,
     );
   }
 }
@@ -927,13 +995,17 @@ class _SearchTrackTile extends StatelessWidget {
 class _TrackActions extends StatelessWidget {
   const _TrackActions({
     required this.download,
+    required this.isLiked,
     required this.onDownload,
     required this.onDelete,
+    required this.onToggleLiked,
   });
 
   final DownloadedTrack? download;
+  final bool isLiked;
   final VoidCallback onDownload;
   final VoidCallback onDelete;
+  final VoidCallback onToggleLiked;
 
   @override
   Widget build(BuildContext context) {
@@ -958,6 +1030,11 @@ class _TrackActions extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
+        IconButton(
+          tooltip: isLiked ? 'Remove from liked' : 'Add to liked',
+          onPressed: onToggleLiked,
+          icon: Icon(isLiked ? Icons.favorite : Icons.favorite_border),
+        ),
         IconButton(
           tooltip: isComplete
               ? 'Delete local download'
@@ -1136,4 +1213,27 @@ String _formatDuration(int seconds) {
   final hours = minutes ~/ 60;
   final remainingMinutes = minutes % 60;
   return '$hours:${remainingMinutes.toString().padLeft(2, '0')}:${remainingSeconds.toString().padLeft(2, '0')}';
+}
+
+class _PlayingTileFrame extends StatelessWidget {
+  const _PlayingTileFrame({required this.isPlaying, required this.child});
+
+  final bool isPlaying;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isPlaying) {
+      return child;
+    }
+
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: colorScheme.primary, width: 4)),
+        color: colorScheme.primary.withValues(alpha: 0.08),
+      ),
+      child: child,
+    );
+  }
 }

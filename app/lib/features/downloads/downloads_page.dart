@@ -24,8 +24,9 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
   @override
   Widget build(BuildContext context) {
     final controller = ref.read(downloadControllerProvider);
+    final player = ref.read(playerControllerProvider);
     return ListenableBuilder(
-      listenable: controller,
+      listenable: Listenable.merge([controller, player]),
       builder: (context, _) {
         if (!controller.isLoaded) {
           return const Center(child: CircularProgressIndicator());
@@ -58,6 +59,9 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
                 itemBuilder: (context, index) {
                   return _DownloadTile(
                     download: controller.tracks[index],
+                    isPlaying: player.isCurrentTrack(
+                      controller.tracks[index].trackId,
+                    ),
                     onPlay: () => _playDownload(controller.tracks, index),
                     onRetry: () =>
                         controller.retryDownload(controller.tracks[index]),
@@ -147,6 +151,8 @@ String? _repairMessage(DownloadRepairResult? repairResult) {
       '${repairResult.removedAudioCount} missing audio removed',
     if (repairResult.clearedCoverCount > 0)
       '${repairResult.clearedCoverCount} missing covers cleared',
+    if (repairResult.recoveredCoverCount > 0)
+      '${repairResult.recoveredCoverCount} local covers recovered',
   ];
   return 'Repaired ${parts.join(' • ')}.';
 }
@@ -154,12 +160,14 @@ String? _repairMessage(DownloadRepairResult? repairResult) {
 class _DownloadTile extends StatelessWidget {
   const _DownloadTile({
     required this.download,
+    required this.isPlaying,
     required this.onPlay,
     required this.onRetry,
     required this.onDelete,
   });
 
   final DownloadedTrack download;
+  final bool isPlaying;
   final VoidCallback onPlay;
   final VoidCallback onRetry;
   final VoidCallback onDelete;
@@ -184,62 +192,73 @@ class _DownloadTile extends StatelessWidget {
       if (download.bytes != null) _formatBytes(download.bytes!),
     ].join(' • ');
 
-    return ListTile(
-      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-      leading: Icon(stateIcon, color: stateColor),
-      title: Text(download.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-      subtitle: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-          if (download.state == DownloadState.downloading)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: LinearProgressIndicator(value: download.progress),
-            ),
-          if (download.state == DownloadState.failed &&
-              download.errorMessage != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 4),
-              child: Text(
-                download.errorMessage!,
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: colorScheme.error),
+    return _PlayingTileFrame(
+      isPlaying: isPlaying,
+      child: ListTile(
+        contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+        leading: Icon(stateIcon, color: stateColor),
+        title: Text(
+          download.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+            if (download.state == DownloadState.downloading)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: LinearProgressIndicator(value: download.progress),
+              ),
+            if (download.state == DownloadState.failed &&
+                download.errorMessage != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  download.errorMessage!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: colorScheme.error),
+                ),
+              ),
+          ],
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (download.state == DownloadState.failed)
+              IconButton(
+                tooltip: 'Retry download',
+                onPressed: onRetry,
+                icon: const Icon(Icons.refresh_outlined),
+              ),
+            IconButton(
+              tooltip: download.state == DownloadState.complete
+                  ? 'Play downloaded track'
+                  : 'Download location',
+              onPressed: download.state == DownloadState.complete
+                  ? onPlay
+                  : null,
+              icon: Icon(
+                isPlaying
+                    ? Icons.graphic_eq_outlined
+                    : download.state == DownloadState.complete
+                    ? Icons.play_arrow_outlined
+                    : Icons.folder_outlined,
               ),
             ),
-        ],
-      ),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (download.state == DownloadState.failed)
             IconButton(
-              tooltip: 'Retry download',
-              onPressed: onRetry,
-              icon: const Icon(Icons.refresh_outlined),
+              tooltip: 'Delete local download',
+              onPressed: download.state == DownloadState.downloading
+                  ? null
+                  : onDelete,
+              icon: const Icon(Icons.close),
             ),
-          IconButton(
-            tooltip: download.state == DownloadState.complete
-                ? 'Play downloaded track'
-                : 'Download location',
-            onPressed: download.state == DownloadState.complete ? onPlay : null,
-            icon: Icon(
-              download.state == DownloadState.complete
-                  ? Icons.play_arrow_outlined
-                  : Icons.folder_outlined,
-            ),
-          ),
-          IconButton(
-            tooltip: 'Delete local download',
-            onPressed: download.state == DownloadState.downloading
-                ? null
-                : onDelete,
-            icon: const Icon(Icons.close),
-          ),
-        ],
+          ],
+        ),
+        onTap: download.state == DownloadState.complete ? onPlay : null,
       ),
-      onTap: download.state == DownloadState.complete ? onPlay : null,
     );
   }
 
@@ -249,6 +268,29 @@ class _DownloadTile extends StatelessWidget {
       < 1048576 => '${(bytes / 1024).toStringAsFixed(1)} KB',
       _ => '${(bytes / 1048576).toStringAsFixed(1)} MB',
     };
+  }
+}
+
+class _PlayingTileFrame extends StatelessWidget {
+  const _PlayingTileFrame({required this.isPlaying, required this.child});
+
+  final bool isPlaying;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isPlaying) {
+      return child;
+    }
+
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: colorScheme.primary, width: 4)),
+        color: colorScheme.primary.withValues(alpha: 0.08),
+      ),
+      child: child,
+    );
   }
 }
 

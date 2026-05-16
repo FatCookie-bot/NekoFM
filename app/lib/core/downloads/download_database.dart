@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:path_provider/path_provider.dart';
 import 'package:sqlite3/sqlite3.dart';
 
+import '../likes/liked_track.dart';
 import 'downloaded_track.dart';
 
 class DownloadDatabase {
@@ -88,6 +89,65 @@ class DownloadDatabase {
     }
   }
 
+  Future<List<LikedTrack>> loadLikedTracks() async {
+    final db = await _open();
+    final result = db.select('''
+      SELECT *
+      FROM liked_tracks
+      ORDER BY liked_at DESC
+      ''');
+    return [for (final row in result) _likedTrackFromRow(row)];
+  }
+
+  Future<bool> isTrackLiked(String trackId) async {
+    final db = await _open();
+    final result = db.select(
+      '''
+      SELECT 1
+      FROM liked_tracks
+      WHERE track_id = ?
+      LIMIT 1
+      ''',
+      [trackId],
+    );
+    return result.isNotEmpty;
+  }
+
+  Future<void> upsertLikedTrack(LikedTrack track) async {
+    final db = await _open();
+    db.execute('''
+      INSERT INTO liked_tracks (
+        track_id,
+        title,
+        artist,
+        track_number,
+        duration_seconds,
+        liked_at,
+        album_id,
+        album_name,
+        cover_art_id,
+        cover_art_uri,
+        suffix
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(track_id) DO UPDATE SET
+        title = excluded.title,
+        artist = excluded.artist,
+        track_number = excluded.track_number,
+        duration_seconds = excluded.duration_seconds,
+        liked_at = excluded.liked_at,
+        album_id = excluded.album_id,
+        album_name = excluded.album_name,
+        cover_art_id = excluded.cover_art_id,
+        cover_art_uri = excluded.cover_art_uri,
+        suffix = excluded.suffix
+      ''', _likedTrackArguments(track));
+  }
+
+  Future<void> deleteLikedTrack(String trackId) async {
+    final db = await _open();
+    db.execute('DELETE FROM liked_tracks WHERE track_id = ?', [trackId]);
+  }
+
   Future<void> close() async {
     _database?.close();
     _database = null;
@@ -143,6 +203,29 @@ class DownloadDatabase {
     db.execute('''
       CREATE INDEX IF NOT EXISTS downloaded_tracks_updated_idx
       ON downloaded_tracks(updated_at DESC)
+      ''');
+    db.execute('''
+      CREATE TABLE IF NOT EXISTS liked_tracks (
+        track_id TEXT PRIMARY KEY NOT NULL,
+        title TEXT NOT NULL,
+        artist TEXT NOT NULL,
+        track_number INTEGER NOT NULL,
+        duration_seconds INTEGER NOT NULL,
+        liked_at TEXT NOT NULL,
+        album_id TEXT,
+        album_name TEXT,
+        cover_art_id TEXT,
+        cover_art_uri TEXT,
+        suffix TEXT
+      )
+      ''');
+    db.execute('''
+      CREATE INDEX IF NOT EXISTS liked_tracks_liked_at_idx
+      ON liked_tracks(liked_at DESC)
+      ''');
+    db.execute('''
+      CREATE INDEX IF NOT EXISTS liked_tracks_album_idx
+      ON liked_tracks(album_id, album_name)
       ''');
     _isInitialized = true;
   }
@@ -200,6 +283,40 @@ class DownloadDatabase {
       track.receivedBytes,
       track.totalBytes,
       track.errorMessage,
+    ];
+  }
+
+  LikedTrack _likedTrackFromRow(Row row) {
+    return LikedTrack(
+      trackId: row['track_id'] as String,
+      title: row['title'] as String,
+      artist: row['artist'] as String,
+      trackNumber: row['track_number'] as int,
+      durationSeconds: row['duration_seconds'] as int,
+      likedAt:
+          DateTime.tryParse(row['liked_at'] as String? ?? '') ??
+          DateTime.fromMillisecondsSinceEpoch(0),
+      albumId: row['album_id'] as String?,
+      albumName: row['album_name'] as String?,
+      coverArtId: row['cover_art_id'] as String?,
+      coverArtUri: row['cover_art_uri'] as String?,
+      suffix: row['suffix'] as String?,
+    );
+  }
+
+  List<Object?> _likedTrackArguments(LikedTrack track) {
+    return [
+      track.trackId,
+      track.title,
+      track.artist,
+      track.trackNumber,
+      track.durationSeconds,
+      track.likedAt.toIso8601String(),
+      track.albumId,
+      track.albumName,
+      track.coverArtId,
+      track.coverArtUri,
+      track.suffix,
     ];
   }
 }

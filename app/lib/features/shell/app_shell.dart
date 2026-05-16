@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../downloads/downloads_page.dart';
+import '../liked/liked_page.dart';
 import '../library/library_page.dart';
 import '../player/mini_player.dart';
 import '../player/player_page.dart';
@@ -20,6 +21,7 @@ class _AppShellState extends State<AppShell> {
   static const _destinations = <_ShellDestination>[
     _ShellDestination(label: 'Library', icon: Icons.album_outlined),
     _ShellDestination(label: 'Player', icon: Icons.play_circle_outline),
+    _ShellDestination(label: 'Liked', icon: Icons.favorite_border),
     _ShellDestination(label: 'Downloads', icon: Icons.download_outlined),
     _ShellDestination(label: 'Settings', icon: Icons.settings_outlined),
   ];
@@ -96,8 +98,9 @@ class _AppShellState extends State<AppShell> {
     return switch (index) {
       0 => LibraryPage(key: ValueKey(_libraryResetKey)),
       1 => const PlayerPage(),
-      2 => const DownloadsPage(),
-      3 => const SettingsPage(),
+      2 => const LikedPage(),
+      3 => const DownloadsPage(),
+      4 => const SettingsPage(),
       _ => const LibraryPage(),
     };
   }

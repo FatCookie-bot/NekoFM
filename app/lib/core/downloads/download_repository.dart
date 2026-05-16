@@ -63,6 +63,7 @@ class DownloadRepository {
     final repairedTracks = <DownloadedTrack>[];
     var removedAudioCount = 0;
     var clearedCoverCount = 0;
+    var recoveredCoverCount = 0;
 
     for (final track in tracks) {
       if (track.state != DownloadState.complete) {
@@ -78,15 +79,36 @@ class DownloadRepository {
 
       final coverPath = track.localCoverPath;
       if (coverPath != null && !await _isUsableFile(coverPath)) {
-        repairedTracks.add(track.copyWith(clearLocalCoverPath: true));
-        clearedCoverCount += 1;
+        final recoveredCoverPath = await _recoverAlbumCoverPath(track);
+        if (recoveredCoverPath == null) {
+          repairedTracks.add(track.copyWith(clearLocalCoverPath: true));
+          clearedCoverCount += 1;
+        } else {
+          repairedTracks.add(
+            track.copyWith(localCoverPath: recoveredCoverPath),
+          );
+          recoveredCoverCount += 1;
+        }
         continue;
+      }
+
+      if (coverPath == null) {
+        final recoveredCoverPath = await _recoverAlbumCoverPath(track);
+        if (recoveredCoverPath != null) {
+          repairedTracks.add(
+            track.copyWith(localCoverPath: recoveredCoverPath),
+          );
+          recoveredCoverCount += 1;
+          continue;
+        }
       }
 
       repairedTracks.add(track);
     }
 
-    if (removedAudioCount > 0 || clearedCoverCount > 0) {
+    if (removedAudioCount > 0 ||
+        clearedCoverCount > 0 ||
+        recoveredCoverCount > 0) {
       await saveTracks(repairedTracks);
     }
 
@@ -94,6 +116,7 @@ class DownloadRepository {
       tracks: repairedTracks,
       removedAudioCount: removedAudioCount,
       clearedCoverCount: clearedCoverCount,
+      recoveredCoverCount: recoveredCoverCount,
     );
   }
 
@@ -363,12 +386,37 @@ class DownloadRepository {
   }
 
   Uri? _localCoverUri(DownloadedTrack track) {
-    final path = track.localCoverPath;
-    if (path == null || path.isEmpty || !File(path).existsSync()) {
+    final path = _localCoverPath(track);
+    if (path == null) {
       return null;
     }
 
     return Uri.file(path);
+  }
+
+  String? _localCoverPath(DownloadedTrack track) {
+    final savedPath = track.localCoverPath;
+    if (savedPath != null &&
+        savedPath.isNotEmpty &&
+        File(savedPath).existsSync()) {
+      return savedPath;
+    }
+
+    final inferredPath = '${File(track.localPath).parent.path}/cover.jpg';
+    if (File(inferredPath).existsSync()) {
+      return inferredPath;
+    }
+
+    return null;
+  }
+
+  Future<String?> _recoverAlbumCoverPath(DownloadedTrack track) async {
+    final inferredPath = '${File(track.localPath).parent.path}/cover.jpg';
+    if (await _isUsableFile(inferredPath)) {
+      return inferredPath;
+    }
+
+    return null;
   }
 
   @visibleForTesting
@@ -433,11 +481,14 @@ class DownloadRepairResult {
     required this.tracks,
     required this.removedAudioCount,
     required this.clearedCoverCount,
+    required this.recoveredCoverCount,
   });
 
   final List<DownloadedTrack> tracks;
   final int removedAudioCount;
   final int clearedCoverCount;
+  final int recoveredCoverCount;
 
-  bool get changed => removedAudioCount > 0 || clearedCoverCount > 0;
+  bool get changed =>
+      removedAudioCount > 0 || clearedCoverCount > 0 || recoveredCoverCount > 0;
 }

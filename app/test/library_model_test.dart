@@ -2,12 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:app/core/downloads/download_repository.dart';
 import 'package:app/core/downloads/download_database.dart';
+import 'package:app/core/downloads/download_repository.dart';
 import 'package:app/core/downloads/downloaded_track.dart';
 import 'package:app/core/library/album.dart';
 import 'package:app/core/library/album_detail.dart';
 import 'package:app/core/library/library_search_result.dart';
+import 'package:app/core/library/track.dart';
+import 'package:app/core/likes/liked_repository.dart';
 import 'package:app/core/player/playback_preferences.dart';
 import 'package:app/core/server/music_server_client.dart';
 import 'package:app/core/server/secure_server_profile_store.dart';
@@ -283,6 +285,53 @@ void main() {
     expect(download.copyWith(clearLocalCoverPath: true).localCoverPath, isNull);
   });
 
+  test('recovers album cover beside downloaded audio', () async {
+    SharedPreferencesAsyncPlatform.instance =
+        InMemorySharedPreferencesAsync.empty();
+    final directory = await Directory.systemTemp.createTemp('nekofm-test-');
+    addTearDown(() async {
+      SharedPreferencesAsyncPlatform.instance = null;
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    final audioFile = File('${directory.path}/01 - Sonne.flac');
+    final coverFile = File('${directory.path}/cover.jpg');
+    await audioFile.writeAsBytes([1, 2, 3, 4]);
+    await coverFile.writeAsBytes([5, 6, 7, 8]);
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
+    final repository = DownloadRepository(
+      preferences: SharedPreferencesAsync(),
+      database: database,
+    );
+    await repository.saveTracks([
+      DownloadedTrack(
+        trackId: 'track-1',
+        title: 'Sonne',
+        artist: 'Rammstein',
+        trackNumber: 3,
+        durationSeconds: 272,
+        localPath: audioFile.path,
+        state: DownloadState.complete,
+        updatedAt: DateTime(2026, 5, 16),
+        albumId: 'album-1',
+        albumName: 'Mutter',
+        suffix: 'flac',
+        bytes: 4,
+      ),
+    ]);
+
+    final repairResult = await repository.repairDownloads();
+    final details = await repository.loadDownloadedAlbumDetails();
+
+    expect(repairResult.recoveredCoverCount, 1);
+    expect(repairResult.tracks.single.localCoverPath, coverFile.path);
+    expect(details.single.album.coverArtUri, Uri.file(coverFile.path));
+    expect(details.single.tracks.single.coverArtUri, Uri.file(coverFile.path));
+  });
+
   test('searches downloaded album metadata offline', () async {
     SharedPreferencesAsyncPlatform.instance =
         InMemorySharedPreferencesAsync.empty();
@@ -367,6 +416,31 @@ void main() {
     expect(byId?.title, 'Sonne');
     expect(migrated.single.albumName, 'Mutter');
     expect(await preferences.getBool('downloads.sqlite_migrated.v1'), isTrue);
+  });
+
+  test('persists liked tracks in sqlite', () async {
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
+    final repository = LikedRepository(database: database);
+
+    const track = Track(
+      id: 'track-1',
+      title: 'Sonne',
+      artist: 'Rammstein',
+      trackNumber: 3,
+      durationSeconds: 272,
+      albumId: 'album-1',
+      albumName: 'Mutter',
+      suffix: 'flac',
+    );
+
+    await repository.likeTrack(track);
+    expect(await repository.isLiked(track.id), isTrue);
+    expect((await repository.loadTracks()).single.toTrack().title, 'Sonne');
+
+    await repository.unlikeTrack(track.id);
+    expect(await repository.isLiked(track.id), isFalse);
+    expect(await repository.loadTracks(), isEmpty);
   });
 
   test('decides when back restarts the current track', () {

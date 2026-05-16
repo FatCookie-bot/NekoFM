@@ -3,19 +3,32 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:just_audio/just_audio.dart';
 
 import '../../core/library/track.dart';
+import '../../core/likes/liked_controller.dart';
 import '../../core/player/player_controller.dart';
 import 'album_art.dart';
 import 'playback_formatting.dart';
 
-class PlayerPage extends ConsumerWidget {
+class PlayerPage extends ConsumerStatefulWidget {
   const PlayerPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<PlayerPage> createState() => _PlayerPageState();
+}
+
+class _PlayerPageState extends ConsumerState<PlayerPage> {
+  @override
+  void initState() {
+    super.initState();
+    ref.read(likedControllerProvider).load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final controller = ref.watch(playerControllerProvider);
+    final liked = ref.watch(likedControllerProvider);
 
     return ListenableBuilder(
-      listenable: controller,
+      listenable: Listenable.merge([controller, liked]),
       builder: (context, _) {
         if (!controller.hasQueue) {
           return const _EmptyPlayer();
@@ -35,6 +48,10 @@ class PlayerPage extends ConsumerWidget {
                   artistName: controller.album?.artist,
                   coverArtUri: controller.album?.coverArtUri,
                   source: controller.sourceAt(indexSnapshot.data),
+                  isLiked: track == null ? false : liked.isLiked(track.id),
+                  onToggleLiked: track == null
+                      ? null
+                      : () => liked.toggleTrack(track),
                   isLoading: controller.isLoading,
                   errorMessage: controller.errorMessage,
                 ),
@@ -95,6 +112,8 @@ class _NowPlayingHeader extends StatelessWidget {
     required this.artistName,
     required this.coverArtUri,
     required this.source,
+    required this.isLiked,
+    required this.onToggleLiked,
     required this.isLoading,
     required this.errorMessage,
   });
@@ -104,6 +123,8 @@ class _NowPlayingHeader extends StatelessWidget {
   final String? artistName;
   final Uri? coverArtUri;
   final PlaybackSource? source;
+  final bool isLiked;
+  final VoidCallback? onToggleLiked;
   final bool isLoading;
   final String? errorMessage;
 
@@ -146,7 +167,21 @@ class _NowPlayingHeader extends StatelessWidget {
                 ),
                 if (source != null) ...[
                   const SizedBox(height: 8),
-                  _PlaybackSourceChip(source: source!),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      _PlaybackSourceChip(source: source!),
+                      IconButton(
+                        tooltip: isLiked ? 'Remove from liked' : 'Add to liked',
+                        onPressed: onToggleLiked,
+                        icon: Icon(
+                          isLiked ? Icons.favorite : Icons.favorite_border,
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
                 if (isLoading || errorMessage != null) ...[
                   const SizedBox(height: 8),
@@ -205,24 +240,31 @@ class _PlaybackSourceChip extends StatelessWidget {
   }
 }
 
-class _PlaybackTimeline extends StatelessWidget {
+class _PlaybackTimeline extends StatefulWidget {
   const _PlaybackTimeline({required this.controller});
 
   final PlayerController controller;
 
   @override
+  State<_PlaybackTimeline> createState() => _PlaybackTimelineState();
+}
+
+class _PlaybackTimelineState extends State<_PlaybackTimeline> {
+  Duration? _previewPosition;
+
+  @override
   Widget build(BuildContext context) {
     return StreamBuilder<Duration?>(
-      stream: controller.audioPlayer.durationStream,
-      initialData: controller.audioPlayer.duration,
+      stream: widget.controller.audioPlayer.durationStream,
+      initialData: widget.controller.audioPlayer.duration,
       builder: (context, durationSnapshot) {
         final duration = durationSnapshot.data ?? Duration.zero;
         return StreamBuilder<Duration>(
-          stream: controller.audioPlayer.positionStream,
-          initialData: controller.audioPlayer.position,
+          stream: widget.controller.audioPlayer.positionStream,
+          initialData: widget.controller.audioPlayer.position,
           builder: (context, positionSnapshot) {
             final position = clampPlaybackPosition(
-              positionSnapshot.data ?? Duration.zero,
+              _previewPosition ?? positionSnapshot.data ?? Duration.zero,
               duration,
             );
             return Column(
@@ -235,9 +277,30 @@ class _PlaybackTimeline extends StatelessWidget {
                       : duration.inMilliseconds.toDouble(),
                   onChanged: duration.inMilliseconds <= 0
                       ? null
-                      : (value) => controller.seek(
-                          Duration(milliseconds: value.round()),
-                        ),
+                      : (value) {
+                          setState(() {
+                            _previewPosition = Duration(
+                              milliseconds: value.round(),
+                            );
+                          });
+                        },
+                  onChangeEnd: duration.inMilliseconds <= 0
+                      ? null
+                      : (value) async {
+                          final position = Duration(
+                            milliseconds: value.round(),
+                          );
+                          setState(() {
+                            _previewPosition = position;
+                          });
+                          await widget.controller.seek(position);
+                          if (!mounted) {
+                            return;
+                          }
+                          setState(() {
+                            _previewPosition = null;
+                          });
+                        },
                 ),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -325,30 +388,55 @@ class _QueueList extends StatelessWidget {
           itemBuilder: (context, index) {
             final track = controller.queue[index];
             final isCurrent = index == currentIndex;
-            return ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-              leading: Icon(
-                isCurrent
-                    ? Icons.graphic_eq_outlined
-                    : Icons.music_note_outlined,
+            return _PlayingTileFrame(
+              isPlaying: isCurrent,
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                leading: Icon(
+                  isCurrent
+                      ? Icons.graphic_eq_outlined
+                      : Icons.music_note_outlined,
+                ),
+                title: Text(
+                  track.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(
+                  '${track.artist} • ${formatPlaybackDuration(Duration(seconds: track.durationSeconds))}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                onTap: () =>
+                    controller.audioPlayer.seek(Duration.zero, index: index),
               ),
-              title: Text(
-                track.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Text(
-                '${track.artist} • ${formatPlaybackDuration(Duration(seconds: track.durationSeconds))}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              selected: isCurrent,
-              onTap: () =>
-                  controller.audioPlayer.seek(Duration.zero, index: index),
             );
           },
         );
       },
+    );
+  }
+}
+
+class _PlayingTileFrame extends StatelessWidget {
+  const _PlayingTileFrame({required this.isPlaying, required this.child});
+
+  final bool isPlaying;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!isPlaying) {
+      return child;
+    }
+
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        border: Border(left: BorderSide(color: colorScheme.primary, width: 4)),
+        color: colorScheme.primary.withValues(alpha: 0.08),
+      ),
+      child: child,
     );
   }
 }

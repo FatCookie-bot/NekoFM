@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -29,13 +30,18 @@ class PlayerController extends ChangeNotifier {
        _profileStore = profileStore ?? const SecureServerProfileStore(),
        _client = client ?? MusicServerClient(),
        _downloadRepository = downloadRepository ?? DownloadRepository(),
-       _playbackPreferences = playbackPreferences ?? PlaybackPreferences();
+       _playbackPreferences = playbackPreferences ?? PlaybackPreferences() {
+    _currentIndexSubscription = this.audioPlayer.currentIndexStream.listen((_) {
+      notifyListeners();
+    });
+  }
 
   final AudioPlayer audioPlayer;
   final SecureServerProfileStore _profileStore;
   final MusicServerClient _client;
   final DownloadRepository _downloadRepository;
   final PlaybackPreferences _playbackPreferences;
+  late final StreamSubscription<int?> _currentIndexSubscription;
 
   List<Track> _queue = const [];
   List<PlaybackSource> _queueSources = const [];
@@ -48,6 +54,13 @@ class PlayerController extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   bool get isLoading => _isLoading;
   bool get hasQueue => _queue.isNotEmpty;
+  Track? get currentTrack => trackAt(audioPlayer.currentIndex);
+  Album? get currentAlbum => _album;
+
+  bool isCurrentTrack(String trackId) => currentTrack?.id == trackId;
+  bool isCurrentAlbum(String albumId) {
+    return currentAlbum?.id == albumId || currentTrack?.albumId == albumId;
+  }
 
   Track? trackAt(int? index) {
     if (index == null || index < 0 || index >= _queue.length) {
@@ -268,6 +281,7 @@ class PlayerController extends ChangeNotifier {
 
   @override
   Future<void> dispose() async {
+    await _currentIndexSubscription.cancel();
     await audioPlayer.dispose();
     super.dispose();
   }

@@ -102,3 +102,9 @@ Still needed:
 ## App Downloads Versus Exports
 
 App-managed downloads are for reliable offline playback inside NekoFM. Exports are user-visible folders for SD cards, USB drives, and other players.
+
+## Liked Playlist
+
+Liked songs are stored inside SQLite as app metadata. M3U is intentionally not used for the in-app liked playlist.
+
+M3U should be added later as an export format for SD card and car playback. Exported M3U files should use paths relative to the exported music folder, not absolute macOS paths.
