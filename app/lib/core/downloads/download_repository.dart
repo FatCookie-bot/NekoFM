@@ -8,6 +8,7 @@ import '../library/album.dart';
 import '../library/album_detail.dart';
 import '../library/library_search_result.dart';
 import '../library/track.dart';
+import 'download_database.dart';
 import 'download_preferences.dart';
 import 'downloaded_track.dart';
 
@@ -15,18 +16,28 @@ class DownloadRepository {
   DownloadRepository({
     SharedPreferencesAsync? preferences,
     DownloadPreferences? downloadPreferences,
+    DownloadDatabase? database,
   }) : _preferences = preferences,
+       _database = database ?? DownloadDatabase(),
        _downloadPreferences =
            downloadPreferences ?? DownloadPreferences(preferences: preferences);
 
   static const _tracksKey = 'downloads.tracks.v1';
+  static const _sqliteMigrationKey = 'downloads.sqlite_migrated.v1';
 
   final SharedPreferencesAsync? _preferences;
+  final DownloadDatabase _database;
   final DownloadPreferences _downloadPreferences;
+  bool _hasCheckedLegacyMigration = false;
 
   SharedPreferencesAsync get _store => _preferences ?? SharedPreferencesAsync();
 
   Future<List<DownloadedTrack>> loadTracks() async {
+    await _migrateLegacyTracksIfNeeded();
+    return _database.loadTracks();
+  }
+
+  Future<List<DownloadedTrack>> _loadLegacyPreferenceTracks() async {
     final raw = await _store.getString(_tracksKey);
     if (raw == null || raw.isEmpty) {
       return const [];
@@ -87,12 +98,10 @@ class DownloadRepository {
   }
 
   Future<void> saveTracks(List<DownloadedTrack> tracks) async {
+    await _migrateLegacyTracksIfNeeded();
     final sorted = [...tracks]
       ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
-    await _store.setString(
-      _tracksKey,
-      jsonEncode([for (final track in sorted) track.toJson()]),
-    );
+    await _database.replaceTracks(sorted);
     await _writeFolderManifests(sorted);
   }
 
@@ -110,13 +119,8 @@ class DownloadRepository {
   }
 
   Future<DownloadedTrack?> trackById(String trackId) async {
-    for (final track in await loadTracks()) {
-      if (track.trackId == trackId) {
-        return track;
-      }
-    }
-
-    return null;
+    await _migrateLegacyTracksIfNeeded();
+    return _database.trackById(trackId);
   }
 
   Future<String?> localFileForTrack(String trackId) async {
@@ -204,6 +208,29 @@ class DownloadRepository {
     }
 
     return directory;
+  }
+
+  Future<void> _migrateLegacyTracksIfNeeded() async {
+    if (_hasCheckedLegacyMigration) {
+      return;
+    }
+
+    final alreadyMigrated = await _store.getBool(_sqliteMigrationKey) ?? false;
+    if (alreadyMigrated) {
+      _hasCheckedLegacyMigration = true;
+      return;
+    }
+
+    final legacyTracks = await _loadLegacyPreferenceTracks();
+    if (legacyTracks.isNotEmpty && await _database.isEmpty()) {
+      final sorted = [...legacyTracks]
+        ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
+      await _database.replaceTracks(sorted);
+      await _writeFolderManifests(sorted);
+    }
+
+    await _store.setBool(_sqliteMigrationKey, true);
+    _hasCheckedLegacyMigration = true;
   }
 
   Future<List<AlbumDetail>> loadDownloadedAlbumDetails() async {

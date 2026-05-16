@@ -83,10 +83,13 @@ Current behavior:
 - Downloads are written to a `.partial` file first.
 - The partial file is renamed only after the HTTP download succeeds.
 - The completed file is verified to exist and be non-empty.
-- Download metadata persists in shared preferences.
+- Download metadata persists in SQLite under the app support directory.
+- Existing SharedPreferences download metadata is imported into SQLite once.
 - Downloaded audio files live in the chosen download folder.
 - The Downloads tab shows downloading, complete, and failed states.
 - Playback checks for a verified local file before falling back to the server stream.
+- Player and mini-player show whether playback is local or streaming.
+- Offline search can use downloaded metadata when Navidrome is unavailable.
 
 Changing the download folder affects new downloads only. Existing downloads keep their saved local paths.
 
@@ -94,9 +97,7 @@ Still needed:
 
 - moving existing downloads to a new folder
 - stronger download job model
-- Drift/SQLite persistence
-- richer offline search from cached metadata
-- local/offline source indicator in the player
+- richer offline search ranking
 
 ## App Downloads Versus Exports
 

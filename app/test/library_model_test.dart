@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:app/core/downloads/download_repository.dart';
+import 'package:app/core/downloads/download_database.dart';
 import 'package:app/core/downloads/downloaded_track.dart';
 import 'package:app/core/library/album.dart';
 import 'package:app/core/library/album_detail.dart';
@@ -16,6 +17,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
+import 'package:sqlite3/sqlite3.dart';
 
 void main() {
   test('parses Subsonic album summary', () {
@@ -294,8 +296,11 @@ void main() {
 
     final audioFile = File('${directory.path}/01 - Sonne.flac');
     await audioFile.writeAsBytes([1, 2, 3, 4]);
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
     final repository = DownloadRepository(
       preferences: SharedPreferencesAsync(),
+      database: database,
     );
     await repository.saveTracks([
       DownloadedTrack(
@@ -318,6 +323,50 @@ void main() {
 
     expect(result.albums.single.name, 'Mutter');
     expect(result.tracks.single.title, 'Sonne');
+  });
+
+  test('migrates legacy downloaded metadata into sqlite', () async {
+    SharedPreferencesAsyncPlatform.instance =
+        InMemorySharedPreferencesAsync.empty();
+    addTearDown(() {
+      SharedPreferencesAsyncPlatform.instance = null;
+    });
+
+    final preferences = SharedPreferencesAsync();
+    await preferences.setString(
+      'downloads.tracks.v1',
+      jsonEncode([
+        {
+          'trackId': 'track-1',
+          'title': 'Sonne',
+          'artist': 'Rammstein',
+          'trackNumber': 3,
+          'durationSeconds': 272,
+          'localPath': '/tmp/Sonne.flac',
+          'state': 'complete',
+          'updatedAt': '2026-05-16T12:00:00.000',
+          'albumId': 'album-1',
+          'albumName': 'Mutter',
+          'suffix': 'flac',
+          'bytes': 4,
+        },
+      ]),
+    );
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
+    final repository = DownloadRepository(
+      preferences: preferences,
+      database: database,
+    );
+
+    final tracks = await repository.loadTracks();
+    final byId = await repository.trackById('track-1');
+    final migrated = await database.loadTracks();
+
+    expect(tracks.single.trackId, 'track-1');
+    expect(byId?.title, 'Sonne');
+    expect(migrated.single.albumName, 'Mutter');
+    expect(await preferences.getBool('downloads.sqlite_migrated.v1'), isTrue);
   });
 
   test('decides when back restarts the current track', () {

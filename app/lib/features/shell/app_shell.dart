@@ -15,28 +15,13 @@ class AppShell extends StatefulWidget {
 
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
+  int _libraryResetKey = 0;
 
   static const _destinations = <_ShellDestination>[
-    _ShellDestination(
-      label: 'Library',
-      icon: Icons.album_outlined,
-      page: LibraryPage(),
-    ),
-    _ShellDestination(
-      label: 'Player',
-      icon: Icons.play_circle_outline,
-      page: PlayerPage(),
-    ),
-    _ShellDestination(
-      label: 'Downloads',
-      icon: Icons.download_outlined,
-      page: DownloadsPage(),
-    ),
-    _ShellDestination(
-      label: 'Settings',
-      icon: Icons.settings_outlined,
-      page: SettingsPage(),
-    ),
+    _ShellDestination(label: 'Library', icon: Icons.album_outlined),
+    _ShellDestination(label: 'Player', icon: Icons.play_circle_outline),
+    _ShellDestination(label: 'Downloads', icon: Icons.download_outlined),
+    _ShellDestination(label: 'Settings', icon: Icons.settings_outlined),
   ];
 
   @override
@@ -67,6 +52,7 @@ class _AppShellState extends State<AppShell> {
             Expanded(
               child: _ShellPage(
                 destination: _destinations[_selectedIndex],
+                page: _pageForIndex(_selectedIndex),
                 showMiniPlayer: _selectedIndex != 1,
                 onOpenPlayer: () => _selectDestination(1),
               ),
@@ -79,6 +65,7 @@ class _AppShellState extends State<AppShell> {
     return Scaffold(
       body: _ShellPage(
         destination: _destinations[_selectedIndex],
+        page: _pageForIndex(_selectedIndex),
         showMiniPlayer: _selectedIndex != 1,
         onOpenPlayer: () => _selectDestination(1),
       ),
@@ -98,31 +85,41 @@ class _AppShellState extends State<AppShell> {
 
   void _selectDestination(int index) {
     setState(() {
+      if (index == 0 && _selectedIndex == 0) {
+        _libraryResetKey += 1;
+      }
       _selectedIndex = index;
     });
+  }
+
+  Widget _pageForIndex(int index) {
+    return switch (index) {
+      0 => LibraryPage(key: ValueKey(_libraryResetKey)),
+      1 => const PlayerPage(),
+      2 => const DownloadsPage(),
+      3 => const SettingsPage(),
+      _ => const LibraryPage(),
+    };
   }
 }
 
 class _ShellDestination {
-  const _ShellDestination({
-    required this.label,
-    required this.icon,
-    required this.page,
-  });
+  const _ShellDestination({required this.label, required this.icon});
 
   final String label;
   final IconData icon;
-  final Widget page;
 }
 
 class _ShellPage extends StatelessWidget {
   const _ShellPage({
     required this.destination,
+    required this.page,
     required this.showMiniPlayer,
     required this.onOpenPlayer,
   });
 
   final _ShellDestination destination;
+  final Widget page;
   final bool showMiniPlayer;
   final VoidCallback onOpenPlayer;
 
@@ -153,10 +150,7 @@ class _ShellPage extends StatelessWidget {
                   ),
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: destination.page,
-                ),
+                child: Padding(padding: const EdgeInsets.all(24), child: page),
               ),
             ),
             if (showMiniPlayer) ...[
