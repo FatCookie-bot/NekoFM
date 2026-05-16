@@ -1,0 +1,35 @@
+# Local OS/editor noise
+.DS_Store
+.idea/
+.vscode/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.key
+*.pem
+*.p12
+*.mobileprovision
+
+# Navidrome local server state and user music
+music-host/navidrome/data/
+music-host/music/
+
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+build/
+coverage/
+
+# Generated platform artifacts and dependency caches
+**/Pods/
+**/.symlinks/
+**/Flutter/ephemeral/
+
+# Logs and local diagnostics
+*.log
+logs/

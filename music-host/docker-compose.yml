@@ -1,0 +1,22 @@
+services:
+  navidrome:
+    image: deluan/navidrome:0.61.2
+    container_name: nekofm-navidrome
+    ports:
+      - "4533:4533"
+    environment:
+      ND_MUSICFOLDER: /music
+      ND_DATAFOLDER: /data
+      ND_SCANNER_SCHEDULE: "@every 1h"
+      ND_SCANNER_WATCHERWAIT: 1m
+      ND_SCANNER_SCANONSTARTUP: "true"
+      ND_SCANNER_PURGEMISSING: full
+      ND_LOGLEVEL: info
+      ND_SESSIONTIMEOUT: 24h
+    volumes:
+      - navidrome-data:/data
+      - ./music:/music:ro
+    restart: unless-stopped
+
+volumes:
+  navidrome-data:
