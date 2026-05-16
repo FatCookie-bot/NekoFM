@@ -223,6 +223,10 @@ class DownloadRepository {
 
   Future<String> localPathForTrack(Track track) async {
     final directory = await albumDirectoryForTrack(track);
+    return _localPathForTrackInDirectory(track, directory);
+  }
+
+  String _localPathForTrackInDirectory(Track track, Directory directory) {
     final extension = _cleanExtension(track.suffix);
     final title = _safeFilename(track.title);
     final number = track.trackNumber > 0
@@ -241,6 +245,13 @@ class DownloadRepository {
 
   Future<Directory> albumDirectoryForTrack(Track track) async {
     final root = await downloadsDirectory();
+    return albumDirectoryForTrackInRoot(track, root);
+  }
+
+  Future<Directory> albumDirectoryForTrackInRoot(
+    Track track,
+    Directory root,
+  ) async {
     final albumName = track.albumName ?? 'Unknown Album';
     final artistFolderName = _safeFilename(track.artist);
     final albumFolderName = _safeFilename(albumName);
@@ -252,6 +263,97 @@ class DownloadRepository {
     }
 
     return directory;
+  }
+
+  Future<DownloadFolderMoveResult> moveDownloadsToFolder(
+    Directory targetRoot,
+  ) async {
+    await _migrateLegacyTracksIfNeeded();
+    if (!await targetRoot.exists()) {
+      await targetRoot.create(recursive: true);
+    }
+
+    final tracks = await _database.loadTracks();
+    final movedTracks = <DownloadedTrack>[];
+    final movedCoverPaths = <String, String>{};
+    var movedAudioCount = 0;
+    var movedCoverCount = 0;
+    var skippedCount = 0;
+
+    for (final track in tracks) {
+      if (track.state == DownloadState.downloading) {
+        skippedCount += 1;
+        movedTracks.add(track);
+        continue;
+      }
+
+      final destinationDirectory = await albumDirectoryForTrackInRoot(
+        track.toTrack(),
+        targetRoot,
+      );
+      final destinationAudioPath = _localPathForTrackInDirectory(
+        track.toTrack(),
+        destinationDirectory,
+      );
+      var nextTrack = track.copyWith(
+        localPath: destinationAudioPath,
+        updatedAt: DateTime.now(),
+      );
+
+      if (track.state == DownloadState.complete) {
+        final didMoveAudio = await _copyVerifiedFile(
+          sourcePath: track.localPath,
+          destinationPath: destinationAudioPath,
+          expectedBytes: track.bytes,
+        );
+        if (didMoveAudio) {
+          movedAudioCount += 1;
+          await _deleteFileIfDifferent(track.localPath, destinationAudioPath);
+          await _deleteFileIfPresent('${track.localPath}.partial');
+        } else {
+          skippedCount += 1;
+          movedTracks.add(track);
+          continue;
+        }
+      } else {
+        await _deleteFileIfPresent('${track.localPath}.partial');
+      }
+
+      final coverPath = track.localCoverPath;
+      if (coverPath != null && coverPath.isNotEmpty) {
+        final destinationCoverPath = '${destinationDirectory.path}/cover.jpg';
+        final movedCoverPath = movedCoverPaths[coverPath];
+        if (movedCoverPath != null) {
+          nextTrack = nextTrack.copyWith(localCoverPath: movedCoverPath);
+        } else {
+          final didMoveCover = await _copyVerifiedFile(
+            sourcePath: coverPath,
+            destinationPath: destinationCoverPath,
+          );
+          if (didMoveCover) {
+            movedCoverPaths[coverPath] = destinationCoverPath;
+            movedCoverCount += 1;
+            await _deleteFileIfDifferent(coverPath, destinationCoverPath);
+            await _deleteFileIfPresent('$coverPath.partial');
+            nextTrack = nextTrack.copyWith(
+              localCoverPath: destinationCoverPath,
+            );
+          } else {
+            nextTrack = nextTrack.copyWith(clearLocalCoverPath: true);
+          }
+        }
+      }
+
+      movedTracks.add(nextTrack);
+    }
+
+    await saveTracks(movedTracks);
+    return DownloadFolderMoveResult(
+      movedAudioCount: movedAudioCount,
+      movedCoverCount: movedCoverCount,
+      skippedCount: skippedCount,
+      totalCount: tracks.length,
+    );
   }
 
   Future<void> _migrateLegacyTracksIfNeeded() async {
@@ -406,6 +508,61 @@ class DownloadRepository {
     }
   }
 
+  Future<bool> _copyVerifiedFile({
+    required String sourcePath,
+    required String destinationPath,
+    int? expectedBytes,
+  }) async {
+    if (sourcePath.isEmpty || destinationPath.isEmpty) {
+      return false;
+    }
+
+    final sourceFile = File(sourcePath);
+    if (!await sourceFile.exists()) {
+      return false;
+    }
+
+    final sourceSize = await sourceFile.length();
+    if (sourceSize <= 0) {
+      return false;
+    }
+
+    if (expectedBytes != null && sourceSize != expectedBytes) {
+      return false;
+    }
+
+    if (sourceFile.path == destinationPath) {
+      return true;
+    }
+
+    final destinationFile = File(destinationPath);
+    if (await destinationFile.exists()) {
+      final destinationSize = await destinationFile.length();
+      if (destinationSize == sourceSize) {
+        return true;
+      }
+
+      await destinationFile.delete();
+    }
+
+    final destinationDirectory = destinationFile.parent;
+    if (!await destinationDirectory.exists()) {
+      await destinationDirectory.create(recursive: true);
+    }
+
+    await sourceFile.copy(destinationPath);
+    return _isUsableFile(destinationPath, expectedBytes: sourceSize);
+  }
+
+  Future<void> _deleteFileIfDifferent(
+    String sourcePath,
+    String destinationPath,
+  ) async {
+    if (sourcePath != destinationPath) {
+      await _deleteFileIfPresent(sourcePath);
+    }
+  }
+
   Uri? _localCoverUri(DownloadedTrack track) {
     final path = _localCoverPath(track);
     if (path == null) {
@@ -495,6 +652,22 @@ class DownloadRepository {
         .replaceAll(RegExp(r'[\s\-_.,:;()[\]{}]+'), ' ')
         .trim();
   }
+}
+
+class DownloadFolderMoveResult {
+  const DownloadFolderMoveResult({
+    required this.movedAudioCount,
+    required this.movedCoverCount,
+    required this.skippedCount,
+    required this.totalCount,
+  });
+
+  final int movedAudioCount;
+  final int movedCoverCount;
+  final int skippedCount;
+  final int totalCount;
+
+  bool get movedAnything => movedAudioCount > 0 || movedCoverCount > 0;
 }
 
 class DownloadRepairResult {

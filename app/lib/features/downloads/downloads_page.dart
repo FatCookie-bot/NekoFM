@@ -1,9 +1,14 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/downloads/download_controller.dart';
 import '../../core/downloads/download_repository.dart';
 import '../../core/downloads/downloaded_track.dart';
+import '../../core/exports/music_exporter.dart';
+import '../../core/likes/liked_controller.dart';
 import '../../core/player/player_controller.dart';
 import '../player/playback_formatting.dart';
 
@@ -15,20 +20,26 @@ class DownloadsPage extends ConsumerStatefulWidget {
 }
 
 class _DownloadsPageState extends ConsumerState<DownloadsPage> {
+  final _exporter = const MusicExporter();
+  bool _isExporting = false;
+  String? _exportMessage;
+
   @override
   void initState() {
     super.initState();
     ref.read(downloadControllerProvider).load();
+    ref.read(likedControllerProvider).load();
   }
 
   @override
   Widget build(BuildContext context) {
     final controller = ref.read(downloadControllerProvider);
+    final liked = ref.read(likedControllerProvider);
     final player = ref.read(playerControllerProvider);
     return ListenableBuilder(
-      listenable: Listenable.merge([controller, player]),
+      listenable: Listenable.merge([controller, liked, player]),
       builder: (context, _) {
-        if (!controller.isLoaded) {
+        if (!controller.isLoaded || !liked.isLoaded) {
           return const Center(child: CircularProgressIndicator());
         }
 
@@ -52,7 +63,17 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
               onRepair: controller.repair,
               failedCount: controller.failedCount,
               onRetryFailed: controller.retryFailedDownloads,
+              completeCount: _completeDownloads(controller.tracks).length,
+              isExporting: _isExporting,
+              onExport: () => _exportDownloads(
+                controller.tracks,
+                liked.tracks.map((track) => track.trackId).toList(),
+              ),
             ),
+            if (_exportMessage != null) ...[
+              const SizedBox(height: 8),
+              _InlineDownloadNotice(message: _exportMessage!),
+            ],
             const SizedBox(height: 8),
             Expanded(
               child: ListView.separated(
@@ -87,6 +108,62 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
     );
   }
 
+  Future<void> _exportDownloads(
+    List<DownloadedTrack> downloads,
+    List<String> likedTrackIds,
+  ) async {
+    final completeDownloads = _completeDownloads(downloads);
+    if (completeDownloads.isEmpty) {
+      setState(() {
+        _exportMessage = 'Download tracks before exporting.';
+      });
+      return;
+    }
+
+    final path = await getDirectoryPath(confirmButtonText: 'Export here');
+    if (path == null || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _isExporting = true;
+      _exportMessage = null;
+    });
+
+    try {
+      final result = await _exporter.exportLibrary(
+        downloads: completeDownloads,
+        targetRoot: Directory(path),
+        likedTrackIds: likedTrackIds,
+      );
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isExporting = false;
+        _exportMessage =
+            'Exported ${result.allDownloads.exportedTrackCount} tracks, ${result.allDownloads.copiedCoverCount} covers, and ${result.allDownloads.skippedTrackCount} skipped. ${result.liked == null ? 'No downloaded liked songs for Liked.m3u.' : 'Liked.m3u included.'}';
+      });
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _isExporting = false;
+        _exportMessage = 'Export failed: $error';
+      });
+    }
+  }
+
+  List<DownloadedTrack> _completeDownloads(List<DownloadedTrack> downloads) {
+    return [
+      for (final download in downloads)
+        if (download.state == DownloadState.complete) download,
+    ];
+  }
+
   Future<void> _playDownload(List<DownloadedTrack> downloads, int index) {
     final completeDownloads = [
       for (final download in downloads)
@@ -114,47 +191,100 @@ class _DownloadsToolbar extends StatelessWidget {
     required this.onRepair,
     required this.failedCount,
     required this.onRetryFailed,
+    required this.completeCount,
+    required this.isExporting,
+    required this.onExport,
     this.repairMessage,
   });
 
   final VoidCallback onRepair;
   final int failedCount;
   final VoidCallback onRetryFailed;
+  final int completeCount;
+  final bool isExporting;
+  final VoidCallback onExport;
   final String? repairMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (repairMessage != null)
+          Row(
+            children: [
+              Icon(Icons.build_outlined, size: 18, color: colorScheme.tertiary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  repairMessage!,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        if (repairMessage != null) const SizedBox(height: 8),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (failedCount > 0)
+                OutlinedButton.icon(
+                  onPressed: onRetryFailed,
+                  icon: const Icon(Icons.restart_alt_outlined),
+                  label: Text('Retry failed ($failedCount)'),
+                ),
+              OutlinedButton.icon(
+                onPressed: completeCount <= 0 || isExporting ? null : onExport,
+                icon: isExporting
+                    ? const SizedBox.square(
+                        dimension: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.ios_share_outlined),
+                label: Text(isExporting ? 'Exporting...' : 'Export all'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onRepair,
+                icon: const Icon(Icons.refresh_outlined),
+                label: const Text('Recheck'),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _InlineDownloadNotice extends StatelessWidget {
+  const _InlineDownloadNotice({required this.message});
+
+  final String message;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return Row(
       children: [
-        if (repairMessage != null) ...[
-          Icon(Icons.build_outlined, size: 18, color: colorScheme.tertiary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              repairMessage!,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
+        Icon(Icons.info_outline, size: 18, color: colorScheme.primary),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            message,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
             ),
           ),
-          const SizedBox(width: 8),
-        ] else
-          const Spacer(),
-        if (failedCount > 0) ...[
-          OutlinedButton.icon(
-            onPressed: onRetryFailed,
-            icon: const Icon(Icons.restart_alt_outlined),
-            label: Text('Retry failed ($failedCount)'),
-          ),
-          const SizedBox(width: 8),
-        ],
-        OutlinedButton.icon(
-          onPressed: onRepair,
-          icon: const Icon(Icons.refresh_outlined),
-          label: const Text('Recheck'),
         ),
       ],
     );

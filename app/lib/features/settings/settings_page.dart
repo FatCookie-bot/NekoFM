@@ -1,20 +1,26 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/downloads/download_preferences.dart';
+import '../../core/downloads/download_controller.dart';
+import '../../core/downloads/download_repository.dart';
+import '../../core/downloads/downloaded_track.dart';
 import '../../core/player/playback_preferences.dart';
 import '../../core/server/music_server_client.dart';
 import '../../core/server/secure_server_profile_store.dart';
 import '../../core/server/server_profile.dart';
 
-class SettingsPage extends StatefulWidget {
+class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
 
   @override
-  State<SettingsPage> createState() => _SettingsPageState();
+  ConsumerState<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
+class _SettingsPageState extends ConsumerState<SettingsPage> {
   final _formKey = GlobalKey<FormState>();
   final _serverUrlController = TextEditingController(
     text: 'http://127.0.0.1:4533',
@@ -26,12 +32,14 @@ class _SettingsPageState extends State<SettingsPage> {
   final _client = MusicServerClient();
   final _playbackPreferences = PlaybackPreferences();
   final _downloadPreferences = DownloadPreferences();
+  final _downloadRepository = DownloadRepository();
 
   bool _rememberPassword = true;
   bool _isPasswordVisible = false;
   bool _isLoadingProfile = true;
   bool _isTestingConnection = false;
   bool _isScanningServer = false;
+  bool _isSavingDownloadFolder = false;
   double _previousTrackThresholdSeconds = PlaybackPreferences
       .defaultPreviousTrackThreshold
       .inSeconds
@@ -249,7 +257,7 @@ class _SettingsPageState extends State<SettingsPage> {
               Text('Downloads', style: Theme.of(context).textTheme.titleLarge),
               const SizedBox(height: 6),
               Text(
-                'Choose where new downloaded tracks are saved. Existing downloads keep their saved paths.',
+                'Choose where downloaded tracks are saved. Existing downloads can be moved into the new folder.',
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: colorScheme.onSurfaceVariant,
                 ),
@@ -275,12 +283,23 @@ class _SettingsPageState extends State<SettingsPage> {
                     label: const Text('Choose folder'),
                   ),
                   FilledButton.icon(
-                    onPressed: _saveDownloadFolder,
-                    icon: const Icon(Icons.save_outlined),
-                    label: const Text('Save folder'),
+                    onPressed: _isSavingDownloadFolder
+                        ? null
+                        : _saveDownloadFolder,
+                    icon: _isSavingDownloadFolder
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.save_outlined),
+                    label: Text(
+                      _isSavingDownloadFolder ? 'Saving...' : 'Save folder',
+                    ),
                   ),
                   TextButton.icon(
-                    onPressed: _resetDownloadFolder,
+                    onPressed: _isSavingDownloadFolder
+                        ? null
+                        : _resetDownloadFolder,
                     icon: const Icon(Icons.restore_outlined),
                     label: const Text('Use default'),
                   ),
@@ -427,15 +446,46 @@ class _SettingsPageState extends State<SettingsPage> {
       return;
     }
 
+    setState(() {
+      _isSavingDownloadFolder = true;
+      _downloadFolderMessage = null;
+      _downloadFolderWarning = null;
+    });
+
     try {
+      final currentFolder = await _downloadPreferences.activeDownloadFolder();
+      final shouldMoveDownloads = await _shouldMoveExistingDownloads(
+        currentFolder,
+        Directory(path),
+      );
+      if (shouldMoveDownloads == null) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _isSavingDownloadFolder = false;
+        });
+        return;
+      }
+
+      DownloadFolderMoveResult? moveResult;
+      if (shouldMoveDownloads) {
+        moveResult = await _downloadRepository.moveDownloadsToFolder(
+          Directory(path),
+        );
+        await ref.read(downloadControllerProvider).reloadFromStorage();
+      }
       await _downloadPreferences.saveCustomDownloadFolder(path);
+
       if (!mounted) {
         return;
       }
 
       setState(() {
-        _downloadFolderMessage = 'New downloads will be saved to this folder.';
+        _downloadFolderMessage = _downloadFolderSavedMessage(moveResult);
         _downloadFolderWarning = null;
+        _isSavingDownloadFolder = false;
       });
     } on Object catch (error) {
       if (!mounted) {
@@ -445,22 +495,56 @@ class _SettingsPageState extends State<SettingsPage> {
       setState(() {
         _downloadFolderMessage = null;
         _downloadFolderWarning = 'Download folder could not be saved: $error';
+        _isSavingDownloadFolder = false;
       });
     }
   }
 
   Future<void> _resetDownloadFolder() async {
+    setState(() {
+      _isSavingDownloadFolder = true;
+      _downloadFolderMessage = null;
+      _downloadFolderWarning = null;
+    });
+
     try {
-      await _downloadPreferences.clearCustomDownloadFolder();
+      final currentFolder = await _downloadPreferences.activeDownloadFolder();
       final defaultFolder = await _downloadPreferences.defaultDownloadFolder();
+      final shouldMoveDownloads = await _shouldMoveExistingDownloads(
+        currentFolder,
+        defaultFolder,
+      );
+      if (shouldMoveDownloads == null) {
+        if (!mounted) {
+          return;
+        }
+
+        setState(() {
+          _isSavingDownloadFolder = false;
+        });
+        return;
+      }
+
+      DownloadFolderMoveResult? moveResult;
+      if (shouldMoveDownloads) {
+        moveResult = await _downloadRepository.moveDownloadsToFolder(
+          defaultFolder,
+        );
+        await ref.read(downloadControllerProvider).reloadFromStorage();
+      }
+      await _downloadPreferences.clearCustomDownloadFolder();
+
       if (!mounted) {
         return;
       }
 
       setState(() {
         _downloadFolderController.text = defaultFolder.path;
-        _downloadFolderMessage = 'New downloads will use the default folder.';
+        _downloadFolderMessage = moveResult == null
+            ? 'New downloads will use the default folder.'
+            : _downloadFolderSavedMessage(moveResult);
         _downloadFolderWarning = null;
+        _isSavingDownloadFolder = false;
       });
     } on Object catch (error) {
       if (!mounted) {
@@ -470,8 +554,101 @@ class _SettingsPageState extends State<SettingsPage> {
       setState(() {
         _downloadFolderMessage = null;
         _downloadFolderWarning = 'Default folder could not be restored: $error';
+        _isSavingDownloadFolder = false;
       });
     }
+  }
+
+  Future<bool?> _shouldMoveExistingDownloads(
+    Directory currentFolder,
+    Directory targetFolder,
+  ) async {
+    if (_samePath(currentFolder.path, targetFolder.path)) {
+      return false;
+    }
+
+    final downloads = ref.read(downloadControllerProvider);
+    await downloads.load();
+    final activeDownloads = downloads.tracks.where(
+      (track) =>
+          track.state == DownloadState.queued ||
+          track.state == DownloadState.downloading,
+    );
+    if (activeDownloads.isNotEmpty) {
+      if (!mounted) {
+        return null;
+      }
+
+      setState(() {
+        _downloadFolderWarning =
+            'Wait for current downloads to finish or cancel them before moving the folder.';
+      });
+      return null;
+    }
+
+    final savedTracks = await _downloadRepository.loadTracks();
+    final completeDownloads = savedTracks.where(
+      (track) => track.state == DownloadState.complete,
+    );
+    if (completeDownloads.isEmpty) {
+      return false;
+    }
+
+    if (!mounted) {
+      return null;
+    }
+
+    return showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Move existing downloads?'),
+          content: Text(
+            'Move ${completeDownloads.length} downloaded tracks into the selected folder, or only use it for future downloads.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(null),
+              child: const Text('Cancel'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Only new downloads'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(true),
+              icon: const Icon(Icons.drive_file_move_outlined),
+              label: const Text('Move downloads'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  String _downloadFolderSavedMessage(DownloadFolderMoveResult? moveResult) {
+    if (moveResult == null) {
+      return 'New downloads will be saved to this folder.';
+    }
+
+    final parts = <String>[
+      '${moveResult.movedAudioCount} tracks moved',
+      '${moveResult.movedCoverCount} covers moved',
+      if (moveResult.skippedCount > 0) '${moveResult.skippedCount} skipped',
+    ];
+    return 'Download folder saved. ${parts.join(' • ')}.';
+  }
+
+  bool _samePath(String left, String right) {
+    String normalize(String path) {
+      final trimmed = path.trim();
+      if (trimmed.endsWith('/') && trimmed.length > 1) {
+        return trimmed.substring(0, trimmed.length - 1);
+      }
+      return trimmed;
+    }
+
+    return normalize(left) == normalize(right);
   }
 
   Future<void> _testConnection() async {

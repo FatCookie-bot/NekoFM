@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:app/core/downloads/download_database.dart';
 import 'package:app/core/downloads/download_repository.dart';
 import 'package:app/core/downloads/downloaded_track.dart';
+import 'package:app/core/exports/music_exporter.dart';
 import 'package:app/core/library/album.dart';
 import 'package:app/core/library/album_detail.dart';
 import 'package:app/core/library/library_search_result.dart';
@@ -378,6 +379,260 @@ void main() {
     expect(repairResult.tracks.single.state, DownloadState.queued);
     expect((await repository.loadTracks()).single.state, DownloadState.queued);
   });
+
+  test('moves downloaded files and metadata to a new folder', () async {
+    SharedPreferencesAsyncPlatform.instance =
+        InMemorySharedPreferencesAsync.empty();
+    addTearDown(() {
+      SharedPreferencesAsyncPlatform.instance = null;
+    });
+
+    final tempRoot = await Directory.systemTemp.createTemp('nekofm_move_test_');
+    addTearDown(() async {
+      if (await tempRoot.exists()) {
+        await tempRoot.delete(recursive: true);
+      }
+    });
+
+    final oldAlbumDirectory = Directory('${tempRoot.path}/old/Artist/Album');
+    await oldAlbumDirectory.create(recursive: true);
+    final oldAudioFile = File('${oldAlbumDirectory.path}/01 - Song - t1.flac');
+    final oldCoverFile = File('${oldAlbumDirectory.path}/cover.jpg');
+    await oldAudioFile.writeAsBytes([1, 2, 3, 4]);
+    await oldCoverFile.writeAsBytes([5, 6, 7]);
+
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
+    final repository = DownloadRepository(
+      preferences: SharedPreferencesAsync(),
+      database: database,
+    );
+    await repository.saveTracks([
+      DownloadedTrack(
+        trackId: 't1',
+        title: 'Song',
+        artist: 'Artist',
+        trackNumber: 1,
+        durationSeconds: 120,
+        localPath: oldAudioFile.path,
+        state: DownloadState.complete,
+        updatedAt: DateTime(2026, 5, 16),
+        albumName: 'Album',
+        suffix: 'flac',
+        bytes: 4,
+        localCoverPath: oldCoverFile.path,
+      ),
+    ]);
+
+    final result = await repository.moveDownloadsToFolder(
+      Directory('${tempRoot.path}/new'),
+    );
+    final movedTrack = (await repository.loadTracks()).single;
+
+    expect(result.movedAudioCount, 1);
+    expect(result.movedCoverCount, 1);
+    expect(result.skippedCount, 0);
+    expect(movedTrack.localPath, contains('/new/Artist/Album/'));
+    expect(movedTrack.localCoverPath, contains('/new/Artist/Album/cover.jpg'));
+    expect(await File(movedTrack.localPath).readAsBytes(), [1, 2, 3, 4]);
+    expect(await File(movedTrack.localCoverPath!).readAsBytes(), [5, 6, 7]);
+    expect(await oldAudioFile.exists(), isFalse);
+    expect(await oldCoverFile.exists(), isFalse);
+  });
+
+  test('exports downloaded tracks with relative m3u playlist paths', () async {
+    final tempRoot = await Directory.systemTemp.createTemp('nekofm_export_');
+    addTearDown(() async {
+      if (await tempRoot.exists()) {
+        await tempRoot.delete(recursive: true);
+      }
+    });
+
+    final sourceDirectory = Directory('${tempRoot.path}/source');
+    await sourceDirectory.create(recursive: true);
+    final audioFile = File('${sourceDirectory.path}/song.flac');
+    final coverFile = File('${sourceDirectory.path}/cover.jpg');
+    await audioFile.writeAsBytes([1, 2, 3, 4]);
+    await coverFile.writeAsBytes([5, 6, 7]);
+
+    final exporter = const MusicExporter();
+    final targetRoot = Directory('${tempRoot.path}/export');
+    final result = await exporter.exportDownloads(
+      targetRoot: targetRoot,
+      downloads: [
+        DownloadedTrack(
+          trackId: 'track-1',
+          title: 'First Song',
+          artist: 'Test Artist',
+          trackNumber: 1,
+          durationSeconds: 123,
+          localPath: audioFile.path,
+          state: DownloadState.complete,
+          updatedAt: DateTime(2026, 5, 17),
+          albumName: 'Test Album',
+          suffix: 'flac',
+          bytes: 4,
+          localCoverPath: coverFile.path,
+        ),
+      ],
+    );
+
+    final exportedAudio = File(
+      '${targetRoot.path}/Test_Artist/Test_Album/01_-_First_Song.flac',
+    );
+    final exportedCover = File(
+      '${targetRoot.path}/Test_Artist/Test_Album/cover.jpg',
+    );
+    final playlist = File(result.playlistPath);
+    final playlistText = await playlist.readAsString();
+
+    expect(result.exportedTrackCount, 1);
+    expect(result.copiedCoverCount, 1);
+    expect(result.skippedTrackCount, 0);
+    expect(await exportedAudio.readAsBytes(), [1, 2, 3, 4]);
+    expect(await exportedCover.readAsBytes(), [5, 6, 7]);
+    expect(playlistText, contains('#EXTM3U'));
+    expect(playlistText, contains('#EXTINF:123,Test Artist - First Song'));
+    expect(
+      playlistText,
+      contains('Test_Artist/Test_Album/01_-_First_Song.flac'),
+    );
+    expect(playlistText, isNot(contains(targetRoot.path)));
+  });
+
+  test('exports liked m3u in supplied playlist order', () async {
+    final tempRoot = await Directory.systemTemp.createTemp(
+      'nekofm_liked_export_',
+    );
+    addTearDown(() async {
+      if (await tempRoot.exists()) {
+        await tempRoot.delete(recursive: true);
+      }
+    });
+
+    final sourceDirectory = Directory('${tempRoot.path}/source');
+    await sourceDirectory.create(recursive: true);
+    final firstAudio = File('${sourceDirectory.path}/z.flac');
+    final secondAudio = File('${sourceDirectory.path}/a.flac');
+    await firstAudio.writeAsBytes([1]);
+    await secondAudio.writeAsBytes([2]);
+
+    final result = await const MusicExporter().exportDownloads(
+      targetRoot: Directory('${tempRoot.path}/export'),
+      playlistName: 'Liked',
+      preserveOrder: true,
+      downloads: [
+        DownloadedTrack(
+          trackId: 'z',
+          title: 'Z Song',
+          artist: 'Later Artist',
+          trackNumber: 1,
+          durationSeconds: 10,
+          localPath: firstAudio.path,
+          state: DownloadState.complete,
+          updatedAt: DateTime(2026, 5, 17),
+          albumName: 'Album',
+          suffix: 'flac',
+          bytes: 1,
+        ),
+        DownloadedTrack(
+          trackId: 'a',
+          title: 'A Song',
+          artist: 'Earlier Artist',
+          trackNumber: 1,
+          durationSeconds: 10,
+          localPath: secondAudio.path,
+          state: DownloadState.complete,
+          updatedAt: DateTime(2026, 5, 17),
+          albumName: 'Album',
+          suffix: 'flac',
+          bytes: 1,
+        ),
+      ],
+    );
+
+    final playlistText = await File(result.playlistPath).readAsString();
+    final firstIndex = playlistText.indexOf(
+      'Later_Artist/Album/01_-_Z_Song.flac',
+    );
+    final secondIndex = playlistText.indexOf(
+      'Earlier_Artist/Album/01_-_A_Song.flac',
+    );
+
+    expect(result.playlistPath, endsWith('/Liked.m3u'));
+    expect(firstIndex, greaterThanOrEqualTo(0));
+    expect(secondIndex, greaterThanOrEqualTo(0));
+    expect(firstIndex, lessThan(secondIndex));
+  });
+
+  test(
+    'library export includes liked m3u when liked downloads exist',
+    () async {
+      final tempRoot = await Directory.systemTemp.createTemp(
+        'nekofm_library_export_',
+      );
+      addTearDown(() async {
+        if (await tempRoot.exists()) {
+          await tempRoot.delete(recursive: true);
+        }
+      });
+
+      final sourceDirectory = Directory('${tempRoot.path}/source');
+      await sourceDirectory.create(recursive: true);
+      final likedAudio = File('${sourceDirectory.path}/liked.flac');
+      final otherAudio = File('${sourceDirectory.path}/other.flac');
+      await likedAudio.writeAsBytes([1]);
+      await otherAudio.writeAsBytes([2]);
+
+      final result = await const MusicExporter().exportLibrary(
+        targetRoot: Directory('${tempRoot.path}/export'),
+        likedTrackIds: const ['liked-track'],
+        downloads: [
+          DownloadedTrack(
+            trackId: 'other-track',
+            title: 'Other Song',
+            artist: 'Artist',
+            trackNumber: 1,
+            durationSeconds: 10,
+            localPath: otherAudio.path,
+            state: DownloadState.complete,
+            updatedAt: DateTime(2026, 5, 17),
+            albumName: 'Album',
+            suffix: 'flac',
+            bytes: 1,
+          ),
+          DownloadedTrack(
+            trackId: 'liked-track',
+            title: 'Liked Song',
+            artist: 'Artist',
+            trackNumber: 2,
+            durationSeconds: 10,
+            localPath: likedAudio.path,
+            state: DownloadState.complete,
+            updatedAt: DateTime(2026, 5, 17),
+            albumName: 'Album',
+            suffix: 'flac',
+            bytes: 1,
+          ),
+        ],
+      );
+
+      final allPlaylistText = await File(
+        result.allDownloads.playlistPath,
+      ).readAsString();
+      final likedPlaylistText = await File(
+        result.liked!.playlistPath,
+      ).readAsString();
+
+      expect(result.allDownloads.exportedTrackCount, 2);
+      expect(result.liked?.exportedTrackCount, 1);
+      expect(result.liked?.playlistPath, endsWith('/Liked.m3u'));
+      expect(allPlaylistText, contains('Other_Song.flac'));
+      expect(allPlaylistText, contains('Liked_Song.flac'));
+      expect(likedPlaylistText, contains('Liked_Song.flac'));
+      expect(likedPlaylistText, isNot(contains('Other_Song.flac')));
+    },
+  );
 
   test('searches downloaded album metadata offline', () async {
     SharedPreferencesAsyncPlatform.instance =

@@ -167,6 +167,7 @@ class DownloadedTrack {
   }
 
   DownloadedTrack copyWith({
+    String? localPath,
     DownloadState? state,
     DateTime? updatedAt,
     int? bytes,
@@ -182,7 +183,7 @@ class DownloadedTrack {
       artist: artist,
       trackNumber: trackNumber,
       durationSeconds: durationSeconds,
-      localPath: localPath,
+      localPath: localPath ?? this.localPath,
       state: state ?? this.state,
       updatedAt: updatedAt ?? this.updatedAt,
       albumId: albumId,

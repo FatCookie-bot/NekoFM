@@ -73,6 +73,13 @@ class DownloadController extends ChangeNotifier {
     _processQueue();
   }
 
+  Future<void> reloadFromStorage() async {
+    _tracks = await _repository.loadTracks();
+    _isLoaded = true;
+    notifyListeners();
+    _processQueue();
+  }
+
   Future<void> _load() async {
     final repairResult = await _repository.repairDownloads();
     _tracks = repairResult.tracks;

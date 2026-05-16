@@ -66,6 +66,8 @@ Current behavior:
 - Failed downloads can be retried individually or all together from Downloads.
 - Settings lets the user choose a custom download folder.
 - Settings can reset new downloads back to the default app support folder.
+- Saving a different download folder can move existing downloads and update SQLite paths.
+- Folder moves copy and verify files before deleting old audio or cover files.
 - Downloaded tracks save minimal offline metadata: artist, album, song title, track number, local audio path, and local cover path when available.
 - New downloads are stored as `Artist/Album/` folders inside the chosen download folder.
 - Artist folders contain their album folders.
@@ -95,17 +97,26 @@ Current behavior:
 - Player and mini-player show whether playback is local or streaming.
 - Offline search can use downloaded metadata when Navidrome is unavailable.
 
-Changing the download folder affects new downloads only. Existing downloads keep their saved local paths.
+Changing the download folder can either affect new downloads only or move existing complete downloads into the selected folder. Folder moves are blocked while downloads are queued or active.
 
 Still needed:
 
-- moving existing downloads to a new folder
 - stronger multi-item download job model
 - richer offline search ranking
 
 ## App Downloads Versus Exports
 
 App-managed downloads are for reliable offline playback inside NekoFM. Exports are user-visible folders for SD cards, USB drives, and other players.
+
+Current export behavior:
+
+- Downloads has an `Export all` action for complete downloads.
+- Exports copy files into `Artist/Album/` folders inside the selected export folder.
+- Exports copy one `cover.jpg` per album when a local cover is available.
+- Exports write `NekoFM_All_Downloads.m3u`.
+- Exports also write `Liked.m3u` when liked songs are downloaded locally.
+- M3U entries use relative paths so the exported folder can be moved to an SD card or USB drive.
+- Exports never move, delete, or rewrite app-managed downloads.
 
 ## Liked Playlist
 
