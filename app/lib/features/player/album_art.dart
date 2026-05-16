@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 class AlbumArt extends StatelessWidget {
@@ -19,26 +21,57 @@ class AlbumArt extends StatelessWidget {
       borderRadius: BorderRadius.circular(8),
       child: SizedBox.square(
         dimension: size,
-        child: imageUri == null
-            ? _AlbumArtFallback(colorScheme: colorScheme)
-            : Image.network(
-                imageUri.toString(),
-                fit: BoxFit.cover,
-                semanticLabel: semanticLabel,
-                errorBuilder: (context, error, stackTrace) =>
-                    _AlbumArtFallback(colorScheme: colorScheme),
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) {
-                    return child;
-                  }
-
-                  return _AlbumArtFallback(
-                    colorScheme: colorScheme,
-                    showProgress: true,
-                  );
-                },
-              ),
+        child: _AlbumArtImage(
+          imageUri: imageUri,
+          semanticLabel: semanticLabel,
+          colorScheme: colorScheme,
+        ),
       ),
+    );
+  }
+}
+
+class _AlbumArtImage extends StatelessWidget {
+  const _AlbumArtImage({
+    required this.imageUri,
+    required this.colorScheme,
+    this.semanticLabel,
+  });
+
+  final Uri? imageUri;
+  final ColorScheme colorScheme;
+  final String? semanticLabel;
+
+  @override
+  Widget build(BuildContext context) {
+    final uri = imageUri;
+    if (uri == null) {
+      return _AlbumArtFallback(colorScheme: colorScheme);
+    }
+
+    if (uri.isScheme('file')) {
+      return Image.file(
+        File.fromUri(uri),
+        fit: BoxFit.cover,
+        semanticLabel: semanticLabel,
+        errorBuilder: (context, error, stackTrace) =>
+            _AlbumArtFallback(colorScheme: colorScheme),
+      );
+    }
+
+    return Image.network(
+      uri.toString(),
+      fit: BoxFit.cover,
+      semanticLabel: semanticLabel,
+      errorBuilder: (context, error, stackTrace) =>
+          _AlbumArtFallback(colorScheme: colorScheme),
+      loadingBuilder: (context, child, loadingProgress) {
+        if (loadingProgress == null) {
+          return child;
+        }
+
+        return _AlbumArtFallback(colorScheme: colorScheme, showProgress: true);
+      },
     );
   }
 }

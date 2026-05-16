@@ -3,6 +3,9 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/downloads/download_controller.dart';
+import '../../core/downloads/download_repository.dart';
+import '../../core/downloads/downloaded_track.dart';
 import '../../core/library/album.dart';
 import '../../core/library/album_detail.dart';
 import '../../core/library/library_search_result.dart';
@@ -20,19 +23,23 @@ class LibraryPage extends ConsumerStatefulWidget {
 
 class _LibraryPageState extends ConsumerState<LibraryPage> {
   final _repository = MusicLibraryRepository();
+  final _downloadRepository = DownloadRepository();
   final _searchController = TextEditingController();
 
   Future<List<Album>>? _albumsFuture;
   Future<AlbumDetail>? _albumDetailFuture;
   Future<LibrarySearchResult>? _searchFuture;
+  Map<String, AlbumDetail> _downloadedAlbumDetails = const {};
   Album? _selectedAlbum;
   Timer? _searchDebounce;
   String _searchQuery = '';
+  bool _isShowingDownloadedLibrary = false;
 
   @override
   void initState() {
     super.initState();
     _loadAlbums();
+    ref.read(downloadControllerProvider).load();
   }
 
   @override
@@ -44,53 +51,93 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
 
   @override
   Widget build(BuildContext context) {
+    final downloads = ref.read(downloadControllerProvider);
     if (_selectedAlbum != null) {
-      return _AlbumDetailView(
-        album: _selectedAlbum!,
-        albumDetailFuture: _albumDetailFuture!,
-        onBack: _clearSelectedAlbum,
-        onRetry: () => _openAlbum(_selectedAlbum!),
-        onPlayTrack: _playTrack,
+      return ListenableBuilder(
+        listenable: downloads,
+        builder: (context, _) {
+          return _AlbumDetailView(
+            album: _selectedAlbum!,
+            albumDetailFuture: _albumDetailFuture!,
+            downloads: downloads,
+            onBack: _clearSelectedAlbum,
+            onRetry: () => _openAlbum(_selectedAlbum!),
+            onPlayTrack: _playTrack,
+            onDownloadTrack: downloads.downloadTrack,
+            onDownloadAlbum: downloads.downloadTracks,
+            onDeleteTrack: _deleteTrackDownload,
+            onDeleteAlbum: _deleteAlbumDownloads,
+          );
+        },
       );
     }
 
-    return Column(
-      children: [
-        _LibrarySearchField(
-          controller: _searchController,
-          onChanged: _queueSearch,
-          onClear: _clearSearch,
-        ),
-        const SizedBox(height: 16),
-        Expanded(
-          child: _searchQuery.isEmpty
-              ? _AlbumBrowser(
-                  albumsFuture: _albumsFuture,
-                  onRefresh: _loadAlbums,
-                  onOpenAlbum: _openAlbum,
-                )
-              : _SearchResultsView(
-                  query: _searchQuery,
-                  searchFuture: _searchFuture,
-                  onOpenAlbum: _openAlbum,
-                  onPlayTrack: _playSearchTrack,
-                ),
-        ),
-      ],
+    return ListenableBuilder(
+      listenable: downloads,
+      builder: (context, _) {
+        return Column(
+          children: [
+            _LibrarySearchField(
+              controller: _searchController,
+              onChanged: _queueSearch,
+              onClear: _clearSearch,
+            ),
+            const SizedBox(height: 16),
+            Expanded(
+              child: _searchQuery.isEmpty
+                  ? _AlbumBrowser(
+                      albumsFuture: _albumsFuture,
+                      isDownloadedLibrary: _isShowingDownloadedLibrary,
+                      onRefresh: _loadAlbums,
+                      onOpenAlbum: _openAlbum,
+                    )
+                  : _SearchResultsView(
+                      query: _searchQuery,
+                      searchFuture: _searchFuture,
+                      downloads: downloads,
+                      onOpenAlbum: _openAlbum,
+                      onPlayTrack: _playSearchTrack,
+                      onDownloadTrack: downloads.downloadTrack,
+                      onDeleteTrack: _deleteTrackDownload,
+                    ),
+            ),
+          ],
+        );
+      },
     );
   }
 
   void _loadAlbums() {
     setState(() {
-      _albumsFuture = _repository.getAlbums();
+      _albumsFuture = _loadAlbumsWithOfflineFallback();
     });
   }
 
   void _openAlbum(Album album) {
+    final downloadedDetail = _downloadedAlbumDetails[album.id];
     setState(() {
       _selectedAlbum = album;
-      _albumDetailFuture = _repository.getAlbum(album.id);
+      _albumDetailFuture = downloadedDetail == null
+          ? _repository.getAlbum(album.id)
+          : Future.value(downloadedDetail);
     });
+  }
+
+  Future<List<Album>> _loadAlbumsWithOfflineFallback() async {
+    try {
+      final albums = await _repository.getAlbums();
+      _downloadedAlbumDetails = const {};
+      _isShowingDownloadedLibrary = false;
+      return albums;
+    } on Object {
+      final downloadedDetails = await _downloadRepository
+          .loadDownloadedAlbumDetails();
+      _downloadedAlbumDetails = {
+        for (final detail in downloadedDetails) detail.album.id: detail,
+      };
+      _isShowingDownloadedLibrary = true;
+      return [for (final detail in downloadedDetails) detail.album];
+    }
   }
 
   void _clearSelectedAlbum() {
@@ -168,6 +215,51 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
         );
   }
 
+  Future<void> _deleteTrackDownload(Track track) async {
+    await ref.read(downloadControllerProvider).deleteTrack(track.id);
+    if (!_isShowingDownloadedLibrary || _selectedAlbum == null) {
+      return;
+    }
+
+    final downloadedDetails = await _downloadRepository
+        .loadDownloadedAlbumDetails();
+    _downloadedAlbumDetails = {
+      for (final detail in downloadedDetails) detail.album.id: detail,
+    };
+    final detail = _downloadedAlbumDetails[_selectedAlbum!.id];
+    if (!mounted) {
+      return;
+    }
+
+    setState(() {
+      if (detail == null) {
+        _selectedAlbum = null;
+        _albumDetailFuture = null;
+        _albumsFuture = Future.value([
+          for (final item in downloadedDetails) item.album,
+        ]);
+      } else {
+        _albumDetailFuture = Future.value(detail);
+        _albumsFuture = Future.value([
+          for (final item in downloadedDetails) item.album,
+        ]);
+      }
+    });
+  }
+
+  Future<void> _deleteAlbumDownloads(List<Track> tracks) async {
+    await ref.read(downloadControllerProvider).deleteTracks(tracks);
+    if (!_isShowingDownloadedLibrary || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _selectedAlbum = null;
+      _albumDetailFuture = null;
+      _albumsFuture = _loadAlbumsWithOfflineFallback();
+    });
+  }
+
   Album _albumFromTrack(Track track) {
     return Album(
       id: track.albumId ?? track.id,
@@ -223,11 +315,13 @@ class _LibrarySearchField extends StatelessWidget {
 class _AlbumBrowser extends StatelessWidget {
   const _AlbumBrowser({
     required this.albumsFuture,
+    required this.isDownloadedLibrary,
     required this.onRefresh,
     required this.onOpenAlbum,
   });
 
   final Future<List<Album>>? albumsFuture;
+  final bool isDownloadedLibrary;
   final VoidCallback onRefresh;
   final ValueChanged<Album> onOpenAlbum;
 
@@ -253,27 +347,74 @@ class _AlbumBrowser extends StatelessWidget {
         final albums = snapshot.data ?? const <Album>[];
         if (albums.isEmpty) {
           return _LibraryMessage(
-            icon: Icons.album_outlined,
-            title: 'No albums found',
-            message:
-                'Navidrome is connected, but it did not return any albums yet.',
+            icon: isDownloadedLibrary
+                ? Icons.download_done_outlined
+                : Icons.album_outlined,
+            title: isDownloadedLibrary
+                ? 'No downloaded albums'
+                : 'No albums found',
+            message: isDownloadedLibrary
+                ? 'Navidrome is offline and there are no completed album downloads on this device.'
+                : 'Navidrome is connected, but it did not return any albums yet.',
             actionLabel: 'Refresh',
             onAction: onRefresh,
           );
         }
 
-        return RefreshIndicator(
-          onRefresh: () async => onRefresh(),
-          child: ListView.separated(
-            itemCount: albums.length,
-            separatorBuilder: (_, _) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final album = albums[index];
-              return _AlbumTile(album: album, onTap: () => onOpenAlbum(album));
-            },
-          ),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (isDownloadedLibrary) ...[
+              const _OfflineLibraryNotice(),
+              const SizedBox(height: 8),
+            ],
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: () async => onRefresh(),
+                child: ListView.separated(
+                  itemCount: albums.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final album = albums[index];
+                    return _AlbumTile(
+                      album: album,
+                      onTap: () => onOpenAlbum(album),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
         );
       },
+    );
+  }
+}
+
+class _OfflineLibraryNotice extends StatelessWidget {
+  const _OfflineLibraryNotice();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        color: colorScheme.surfaceContainerHighest,
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.offline_pin_outlined, color: colorScheme.primary),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Navidrome is offline. Showing albums downloaded on this device.',
+              style: Theme.of(context).textTheme.bodyMedium,
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -282,14 +423,20 @@ class _SearchResultsView extends StatelessWidget {
   const _SearchResultsView({
     required this.query,
     required this.searchFuture,
+    required this.downloads,
     required this.onOpenAlbum,
     required this.onPlayTrack,
+    required this.onDownloadTrack,
+    required this.onDeleteTrack,
   });
 
   final String query;
   final Future<LibrarySearchResult>? searchFuture;
+  final DownloadController downloads;
   final ValueChanged<Album> onOpenAlbum;
   final ValueChanged<Track> onPlayTrack;
+  final ValueChanged<Track> onDownloadTrack;
+  final ValueChanged<Track> onDeleteTrack;
 
   @override
   Widget build(BuildContext context) {
@@ -338,7 +485,15 @@ class _SearchResultsView extends StatelessWidget {
             if (result.tracks.isNotEmpty) ...[
               const _ResultSectionHeader(label: 'Tracks'),
               for (final track in result.tracks)
-                _SearchTrackTile(track: track, onTap: () => onPlayTrack(track)),
+                _SearchTrackTile(
+                  track: track,
+                  download: downloads.trackState(track.id),
+                  onTap: () => onPlayTrack(track),
+                  onDownload: () => onDownloadTrack(track),
+                  onDelete: () => _confirmDeleteTrack(context, track, () {
+                    onDeleteTrack(track);
+                  }),
+                ),
             ],
           ],
         );
@@ -351,15 +506,25 @@ class _AlbumDetailView extends StatelessWidget {
   const _AlbumDetailView({
     required this.album,
     required this.albumDetailFuture,
+    required this.downloads,
     required this.onBack,
     required this.onRetry,
     required this.onPlayTrack,
+    required this.onDownloadTrack,
+    required this.onDownloadAlbum,
+    required this.onDeleteTrack,
+    required this.onDeleteAlbum,
   });
 
   final Album album;
   final Future<AlbumDetail> albumDetailFuture;
+  final DownloadController downloads;
   final VoidCallback onBack;
   final VoidCallback onRetry;
+  final ValueChanged<Track> onDownloadTrack;
+  final ValueChanged<List<Track>> onDownloadAlbum;
+  final ValueChanged<Track> onDeleteTrack;
+  final ValueChanged<List<Track>> onDeleteAlbum;
   final Future<void> Function({
     required Album album,
     required List<Track> tracks,
@@ -439,14 +604,40 @@ class _AlbumDetailView extends StatelessWidget {
                 );
               }
 
+              final albumDownload = _AlbumDownloadState.fromTracks(
+                tracks,
+                downloads,
+              );
+
               return ListView.separated(
-                itemCount: tracks.length,
+                itemCount: tracks.length + 1,
                 separatorBuilder: (_, _) => const Divider(height: 1),
                 itemBuilder: (context, index) {
+                  if (index == 0) {
+                    return _AlbumDownloadTile(
+                      state: albumDownload,
+                      onDownload: () => onDownloadAlbum(tracks),
+                      onDelete: () => _confirmDeleteAlbum(
+                        context,
+                        album.name,
+                        () => onDeleteAlbum(tracks),
+                      ),
+                    );
+                  }
+
+                  final track = tracks[index - 1];
                   return _TrackTile(
-                    track: tracks[index],
-                    onTap: () =>
-                        onPlayTrack(album: album, tracks: tracks, index: index),
+                    track: track,
+                    download: downloads.trackState(track.id),
+                    onTap: () => onPlayTrack(
+                      album: album,
+                      tracks: tracks,
+                      index: index - 1,
+                    ),
+                    onDownload: () => onDownloadTrack(track),
+                    onDelete: () => _confirmDeleteTrack(context, track, () {
+                      onDeleteTrack(track);
+                    }),
                   );
                 },
               );
@@ -454,6 +645,119 @@ class _AlbumDetailView extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _AlbumDownloadTile extends StatelessWidget {
+  const _AlbumDownloadTile({
+    required this.state,
+    required this.onDownload,
+    required this.onDelete,
+  });
+
+  final _AlbumDownloadState state;
+  final VoidCallback onDownload;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isDisabled = state.hasActiveDownloads;
+    final subtitle = state.isComplete
+        ? 'All tracks are saved for offline playback.'
+        : state.hasMissingCovers
+        ? '${state.missingCoverCount} local covers missing'
+        : state.hasActiveDownloads
+        ? '${state.downloadingCount} downloading • ${state.completeCount}/${state.totalCount} saved'
+        : '${state.remainingCount} tracks not saved yet';
+
+    return ListTile(
+      contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+      leading: Icon(
+        state.isComplete ? Icons.download_done : Icons.download_for_offline,
+        color: state.isComplete ? colorScheme.tertiary : colorScheme.primary,
+      ),
+      title: Text(state.buttonLabel),
+      subtitle: Text(subtitle),
+      trailing: FilledButton.icon(
+        onPressed: isDisabled
+            ? null
+            : state.isComplete
+            ? onDelete
+            : onDownload,
+        icon: Icon(state.isComplete ? Icons.delete_outline : Icons.download),
+        label: Text(state.buttonLabel),
+      ),
+    );
+  }
+}
+
+class _AlbumDownloadState {
+  const _AlbumDownloadState({
+    required this.totalCount,
+    required this.completeCount,
+    required this.downloadingCount,
+    required this.missingCoverCount,
+  });
+
+  final int totalCount;
+  final int completeCount;
+  final int downloadingCount;
+  final int missingCoverCount;
+
+  int get remainingCount => totalCount - completeCount - downloadingCount;
+  bool get isComplete =>
+      totalCount > 0 && completeCount == totalCount && missingCoverCount == 0;
+  bool get hasActiveDownloads => downloadingCount > 0;
+  bool get hasMissingCovers =>
+      totalCount > 0 && completeCount == totalCount && missingCoverCount > 0;
+
+  String get buttonLabel {
+    if (isComplete) {
+      return 'Delete album';
+    }
+
+    if (hasMissingCovers) {
+      return 'Download covers';
+    }
+
+    if (hasActiveDownloads) {
+      return 'Downloading album';
+    }
+
+    if (completeCount > 0) {
+      return 'Download missing';
+    }
+
+    return 'Download album';
+  }
+
+  factory _AlbumDownloadState.fromTracks(
+    List<Track> tracks,
+    DownloadController downloads,
+  ) {
+    var completeCount = 0;
+    var downloadingCount = 0;
+    var missingCoverCount = 0;
+    for (final track in tracks) {
+      final download = downloads.trackState(track.id);
+      final state = download?.state;
+      if (state == DownloadState.complete) {
+        completeCount += 1;
+        if (track.coverArtUri != null && download?.localCoverPath == null) {
+          missingCoverCount += 1;
+        }
+      } else if (state == DownloadState.downloading) {
+        downloadingCount += 1;
+      }
+    }
+
+    return _AlbumDownloadState(
+      totalCount: tracks.length,
+      completeCount: completeCount,
+      downloadingCount: downloadingCount,
+      missingCoverCount: missingCoverCount,
     );
   }
 }
@@ -489,10 +793,19 @@ class _AlbumTile extends StatelessWidget {
 }
 
 class _TrackTile extends StatelessWidget {
-  const _TrackTile({required this.track, required this.onTap});
+  const _TrackTile({
+    required this.track,
+    required this.download,
+    required this.onTap,
+    required this.onDownload,
+    required this.onDelete,
+  });
 
   final Track track;
+  final DownloadedTrack? download;
   final VoidCallback onTap;
+  final VoidCallback onDownload;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -513,17 +826,30 @@ class _TrackTile extends StatelessWidget {
       ),
       title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: const Icon(Icons.play_arrow_outlined),
+      trailing: _TrackActions(
+        download: download,
+        onDownload: onDownload,
+        onDelete: onDelete,
+      ),
       onTap: onTap,
     );
   }
 }
 
 class _SearchTrackTile extends StatelessWidget {
-  const _SearchTrackTile({required this.track, required this.onTap});
+  const _SearchTrackTile({
+    required this.track,
+    required this.download,
+    required this.onTap,
+    required this.onDownload,
+    required this.onDelete,
+  });
 
   final Track track;
+  final DownloadedTrack? download;
   final VoidCallback onTap;
+  final VoidCallback onDownload;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
@@ -543,8 +869,56 @@ class _SearchTrackTile extends StatelessWidget {
       ),
       title: Text(track.title, maxLines: 1, overflow: TextOverflow.ellipsis),
       subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-      trailing: const Icon(Icons.play_arrow_outlined),
+      trailing: _TrackActions(
+        download: download,
+        onDownload: onDownload,
+        onDelete: onDelete,
+      ),
       onTap: onTap,
+    );
+  }
+}
+
+class _TrackActions extends StatelessWidget {
+  const _TrackActions({
+    required this.download,
+    required this.onDownload,
+    required this.onDelete,
+  });
+
+  final DownloadedTrack? download;
+  final VoidCallback onDownload;
+  final VoidCallback onDelete;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = download?.state;
+    final isDownloading = state == DownloadState.downloading;
+    final isComplete = state == DownloadState.complete;
+
+    if (isDownloading) {
+      return SizedBox.square(
+        dimension: 40,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: CircularProgressIndicator(
+            strokeWidth: 2,
+            value: download?.progress,
+          ),
+        ),
+      );
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          tooltip: isComplete ? 'Delete local download' : 'Download track',
+          onPressed: isComplete ? onDelete : onDownload,
+          icon: Icon(isComplete ? Icons.close : Icons.download_outlined),
+        ),
+        const Icon(Icons.play_arrow_outlined),
+      ],
     );
   }
 }
@@ -560,6 +934,72 @@ class _ResultSectionHeader extends StatelessWidget {
       padding: const EdgeInsets.fromLTRB(4, 8, 4, 6),
       child: Text(label, style: Theme.of(context).textTheme.titleSmall),
     );
+  }
+}
+
+Future<void> _confirmDeleteTrack(
+  BuildContext context,
+  Track track,
+  VoidCallback onConfirm,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        title: const Text('Delete local download?'),
+        content: Text(
+          'Remove "${track.title}" from this device. This will not delete anything from Navidrome.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Delete'),
+          ),
+        ],
+      );
+    },
+  );
+
+  if (confirmed == true) {
+    onConfirm();
+  }
+}
+
+Future<void> _confirmDeleteAlbum(
+  BuildContext context,
+  String albumName,
+  VoidCallback onConfirm,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        title: const Text('Delete local album?'),
+        content: Text(
+          'Remove all downloaded tracks from "$albumName" on this device. This will not delete anything from Navidrome.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Delete album'),
+          ),
+        ],
+      );
+    },
+  );
+
+  if (confirmed == true) {
+    onConfirm();
   }
 }
 

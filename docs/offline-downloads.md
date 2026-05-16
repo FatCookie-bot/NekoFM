@@ -51,6 +51,48 @@ removed
 
 At minimum, verification should check that the file exists, is non-empty, and matches the known downloaded byte count when available.
 
+## Current Implementation
+
+The first download slice is implemented for individual tracks.
+
+Current behavior:
+
+- Library track rows and search track rows have download buttons.
+- Album detail has a download-album button.
+- Album downloads skip tracks that are already downloaded.
+- Settings lets the user choose a custom download folder.
+- Settings can reset new downloads back to the default app support folder.
+- Downloaded tracks save minimal offline metadata: artist, album, song title, track number, local audio path, and local cover path when available.
+- New downloads are stored in per-album folders inside the chosen download folder.
+- Album folders are named from artist and album.
+- Album folders use one shared `cover.jpg`, not one cover per track.
+- Download folders receive a `nekofm_downloads_manifest.json` manifest.
+- Cover art is downloaded beside tracks when available.
+- Library falls back to downloaded albums when the server is unavailable.
+- Offline Library groups downloaded tracks by album.
+- Downloaded track buttons change to a local-delete action.
+- Fully downloaded album button changes to delete album.
+- Local deletes remove NekoFM audio files, cover files, partial files, and metadata only.
+- Local deletes never delete Navidrome/server/source music.
+- Downloads are written to a `.partial` file first.
+- The partial file is renamed only after the HTTP download succeeds.
+- The completed file is verified to exist and be non-empty.
+- Download metadata persists in shared preferences.
+- Downloaded audio files live in the chosen download folder.
+- The Downloads tab shows downloading, complete, and failed states.
+- Playback checks for a verified local file before falling back to the server stream.
+
+Changing the download folder affects new downloads only. Existing downloads keep their saved local paths.
+
+Still needed:
+
+- retry controls
+- moving existing downloads to a new folder
+- stronger download job model
+- Drift/SQLite persistence
+- richer offline search from cached metadata
+- local/offline source indicator in the player
+
 ## App Downloads Versus Exports
 
 App-managed downloads are for reliable offline playback inside NekoFM. Exports are user-visible folders for SD cards, USB drives, and other players.

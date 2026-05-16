@@ -1,3 +1,8 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:app/core/downloads/download_repository.dart';
+import 'package:app/core/downloads/downloaded_track.dart';
 import 'package:app/core/library/album.dart';
 import 'package:app/core/library/album_detail.dart';
 import 'package:app/core/library/library_search_result.dart';
@@ -5,6 +10,7 @@ import 'package:app/core/player/playback_preferences.dart';
 import 'package:app/core/server/music_server_client.dart';
 import 'package:app/core/server/secure_server_profile_store.dart';
 import 'package:app/features/player/playback_formatting.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -59,6 +65,54 @@ void main() {
     expect(detail.tracks, hasLength(2));
     expect(detail.tracks.first.title, '742617000027');
     expect(detail.tracks.last.trackNumber, 2);
+  });
+
+  test('attaches cover art URLs to album detail tracks', () async {
+    final dio = Dio()
+      ..httpClientAdapter = _JsonAdapter({
+        'subsonic-response': {
+          'status': 'ok',
+          'album': {
+            'id': 'album-1',
+            'name': 'Mutter',
+            'artist': 'Rammstein',
+            'songCount': 1,
+            'duration': 272,
+            'coverArt': 'cover-album-1',
+            'song': [
+              {
+                'id': 'track-1',
+                'title': 'Sonne',
+                'artist': 'Rammstein',
+                'album': 'Mutter',
+                'albumId': 'album-1',
+                'track': 3,
+                'duration': 272,
+                'coverArt': 'cover-album-1',
+              },
+            ],
+          },
+        },
+      });
+
+    final fixedDetail = await MusicServerClient(dio: dio).getAlbum(
+      const SavedServerProfile(
+        serverUrl: 'http://127.0.0.1:4533',
+        username: 'user',
+        password: 'password',
+        rememberPassword: true,
+      ),
+      'album-1',
+    );
+
+    expect(
+      fixedDetail.tracks.first.coverArtUri?.path,
+      '/rest/getCoverArt.view',
+    );
+    expect(
+      fixedDetail.tracks.first.coverArtUri?.queryParameters['id'],
+      'cover-album-1',
+    );
   });
 
   test('parses Subsonic search albums and tracks', () {
@@ -145,6 +199,67 @@ void main() {
     expect(uri?.queryParameters, containsPair('s', isNotEmpty));
   });
 
+  test('builds Subsonic download URL for a track', () {
+    final uri = MusicServerClient().downloadUri(
+      const SavedServerProfile(
+        serverUrl: 'http://127.0.0.1:4533',
+        username: 'user',
+        password: 'password',
+        rememberPassword: true,
+      ),
+      'track-1',
+    );
+
+    expect(uri.path, '/rest/download.view');
+    expect(uri.queryParameters['u'], 'user');
+    expect(uri.queryParameters['id'], 'track-1');
+    expect(uri.queryParameters['c'], 'NekoFM');
+    expect(uri.queryParameters, containsPair('t', isNotEmpty));
+    expect(uri.queryParameters, containsPair('s', isNotEmpty));
+  });
+
+  test('sanitizes download filenames', () {
+    expect(
+      DownloadRepository.safeFilenameForTest('../Album:Track?.flac'),
+      '.._Album_Track_.flac',
+    );
+    expect(DownloadRepository.safeFilenameForTest(''), 'track');
+  });
+
+  test('sanitizes album download folder names', () {
+    expect(
+      DownloadRepository.albumFolderNameForTest(
+        artist: 'Red Hot Chili Peppers',
+        albumName: 'Blood Sugar Sex Magik',
+      ),
+      'Red_Hot_Chili_Peppers_-_Blood_Sugar_Sex_Magik',
+    );
+  });
+
+  test('parses downloaded track offline metadata', () {
+    final download = DownloadedTrack.fromJson(const {
+      'trackId': 'track-1',
+      'title': 'Sonne',
+      'artist': 'Rammstein',
+      'trackNumber': 3,
+      'durationSeconds': 272,
+      'localPath': '/tmp/Sonne.flac',
+      'localCoverPath': '/tmp/Sonne.cover',
+      'state': 'complete',
+      'updatedAt': '2026-05-16T12:00:00.000',
+      'albumId': 'album-1',
+      'albumName': 'Mutter',
+      'suffix': 'flac',
+    });
+
+    final track = download.toTrack();
+
+    expect(download.localCoverPath, '/tmp/Sonne.cover');
+    expect(track.trackNumber, 3);
+    expect(track.albumName, 'Mutter');
+    expect(track.coverArtUri?.isScheme('file'), isTrue);
+  });
+
   test('decides when back restarts the current track', () {
     const threshold = Duration(seconds: 3);
 
@@ -186,4 +301,28 @@ void main() {
       '1:02:03',
     );
   });
+}
+
+class _JsonAdapter implements HttpClientAdapter {
+  const _JsonAdapter(this.body);
+
+  final Map<String, dynamic> body;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      jsonEncode(body),
+      200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
 }

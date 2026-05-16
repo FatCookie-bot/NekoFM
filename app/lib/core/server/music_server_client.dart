@@ -116,7 +116,10 @@ class MusicServerClient {
     final detail = AlbumDetail.fromSubsonic(album);
     return AlbumDetail(
       album: _attachCoverArtUri(savedProfile, detail.album),
-      tracks: detail.tracks,
+      tracks: [
+        for (final track in detail.tracks)
+          _attachTrackCoverArtUri(savedProfile, track),
+      ],
     );
   }
 
@@ -155,11 +158,44 @@ class MusicServerClient {
     return ServerScanResult.fromSubsonic(response['scanStatus']);
   }
 
+  Future<void> downloadTrack(
+    SavedServerProfile savedProfile,
+    String trackId,
+    String savePath, {
+    ProgressCallback? onReceiveProgress,
+  }) {
+    return _dio.downloadUri(
+      downloadUri(savedProfile, trackId),
+      savePath,
+      onReceiveProgress: onReceiveProgress,
+      options: Options(
+        sendTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(minutes: 10),
+      ),
+    );
+  }
+
   Uri streamUri(SavedServerProfile savedProfile, String trackId) {
     final profile = savedProfile.toServerProfile();
     final auth = SubsonicAuth.fromPassword(profile.password);
     return profile.normalizedBaseUri.replace(
       path: _joinPath(profile.normalizedBaseUri.path, 'rest/stream.view'),
+      queryParameters: {
+        'u': profile.username,
+        't': auth.token,
+        's': auth.salt,
+        'v': '1.16.1',
+        'c': 'NekoFM',
+        'id': trackId,
+      },
+    );
+  }
+
+  Uri downloadUri(SavedServerProfile savedProfile, String trackId) {
+    final profile = savedProfile.toServerProfile();
+    final auth = SubsonicAuth.fromPassword(profile.password);
+    return profile.normalizedBaseUri.replace(
+      path: _joinPath(profile.normalizedBaseUri.path, 'rest/download.view'),
       queryParameters: {
         'u': profile.username,
         't': auth.token,

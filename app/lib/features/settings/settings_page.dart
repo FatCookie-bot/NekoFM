@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:file_selector/file_selector.dart';
 
+import '../../core/downloads/download_preferences.dart';
 import '../../core/player/playback_preferences.dart';
 import '../../core/server/music_server_client.dart';
 import '../../core/server/secure_server_profile_store.dart';
@@ -19,9 +21,11 @@ class _SettingsPageState extends State<SettingsPage> {
   );
   final _usernameController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _downloadFolderController = TextEditingController();
   final _store = const SecureServerProfileStore();
   final _client = MusicServerClient();
   final _playbackPreferences = PlaybackPreferences();
+  final _downloadPreferences = DownloadPreferences();
 
   bool _rememberPassword = true;
   bool _isPasswordVisible = false;
@@ -36,6 +40,8 @@ class _SettingsPageState extends State<SettingsPage> {
   String? _scanMessage;
   String? _profileLoadWarning;
   String? _preferencesWarning;
+  String? _downloadFolderMessage;
+  String? _downloadFolderWarning;
   ServerConnectionResult? _connectionResult;
 
   @override
@@ -49,6 +55,7 @@ class _SettingsPageState extends State<SettingsPage> {
     _serverUrlController.dispose();
     _usernameController.dispose();
     _passwordController.dispose();
+    _downloadFolderController.dispose();
     super.dispose();
   }
 
@@ -238,6 +245,63 @@ class _SettingsPageState extends State<SettingsPage> {
                   color: colorScheme.tertiary,
                 ),
               ],
+              const SizedBox(height: 32),
+              Text('Downloads', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 6),
+              Text(
+                'Choose where new downloaded tracks are saved. Existing downloads keep their saved paths.',
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _downloadFolderController,
+                decoration: const InputDecoration(
+                  labelText: 'Download folder',
+                  border: OutlineInputBorder(),
+                  prefixIcon: Icon(Icons.folder_outlined),
+                ),
+                textInputAction: TextInputAction.done,
+              ),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: _chooseDownloadFolder,
+                    icon: const Icon(Icons.folder_open_outlined),
+                    label: const Text('Choose folder'),
+                  ),
+                  FilledButton.icon(
+                    onPressed: _saveDownloadFolder,
+                    icon: const Icon(Icons.save_outlined),
+                    label: const Text('Save folder'),
+                  ),
+                  TextButton.icon(
+                    onPressed: _resetDownloadFolder,
+                    icon: const Icon(Icons.restore_outlined),
+                    label: const Text('Use default'),
+                  ),
+                ],
+              ),
+              if (_downloadFolderMessage != null) ...[
+                const SizedBox(height: 12),
+                _InlineNotice(
+                  icon: Icons.check_circle_outline,
+                  message: _downloadFolderMessage!,
+                  color: colorScheme.primary,
+                ),
+              ],
+              if (_downloadFolderWarning != null) ...[
+                const SizedBox(height: 12),
+                _InlineNotice(
+                  icon: Icons.warning_amber_outlined,
+                  message: _downloadFolderWarning!,
+                  color: colorScheme.tertiary,
+                ),
+              ],
             ],
           ),
         ),
@@ -256,6 +320,7 @@ class _SettingsPageState extends State<SettingsPage> {
     }
 
     final threshold = await _loadPreviousTrackThreshold();
+    final downloadFolder = await _loadDownloadFolder();
 
     if (!mounted) {
       return;
@@ -272,6 +337,7 @@ class _SettingsPageState extends State<SettingsPage> {
       _isLoadingProfile = false;
       _profileLoadWarning = loadWarning;
       _previousTrackThresholdSeconds = threshold.inSeconds.toDouble();
+      _downloadFolderController.text = downloadFolder;
     });
   }
 
@@ -289,6 +355,25 @@ class _SettingsPageState extends State<SettingsPage> {
       }
 
       return PlaybackPreferences.defaultPreviousTrackThreshold;
+    }
+  }
+
+  Future<String> _loadDownloadFolder() async {
+    try {
+      final customFolder = await _downloadPreferences
+          .loadCustomDownloadFolder()
+          .timeout(const Duration(seconds: 2));
+      if (customFolder != null) {
+        return customFolder;
+      }
+
+      final defaultFolder = await _downloadPreferences
+          .defaultDownloadFolder()
+          .timeout(const Duration(seconds: 2));
+      return defaultFolder.path;
+    } on Object catch (error) {
+      _downloadFolderWarning = 'Download folder could not be loaded: $error';
+      return '';
     }
   }
 
@@ -310,6 +395,81 @@ class _SettingsPageState extends State<SettingsPage> {
 
       setState(() {
         _preferencesWarning = 'Playback preference could not be saved: $error';
+      });
+    }
+  }
+
+  Future<void> _chooseDownloadFolder() async {
+    final path = await getDirectoryPath(
+      confirmButtonText: 'Use this folder',
+      initialDirectory: _downloadFolderController.text.trim().isEmpty
+          ? null
+          : _downloadFolderController.text.trim(),
+    );
+    if (path == null || !mounted) {
+      return;
+    }
+
+    setState(() {
+      _downloadFolderController.text = path;
+      _downloadFolderMessage = null;
+      _downloadFolderWarning = null;
+    });
+  }
+
+  Future<void> _saveDownloadFolder() async {
+    final path = _downloadFolderController.text.trim();
+    if (path.isEmpty) {
+      setState(() {
+        _downloadFolderMessage = null;
+        _downloadFolderWarning = 'Choose a folder before saving.';
+      });
+      return;
+    }
+
+    try {
+      await _downloadPreferences.saveCustomDownloadFolder(path);
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _downloadFolderMessage = 'New downloads will be saved to this folder.';
+        _downloadFolderWarning = null;
+      });
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _downloadFolderMessage = null;
+        _downloadFolderWarning = 'Download folder could not be saved: $error';
+      });
+    }
+  }
+
+  Future<void> _resetDownloadFolder() async {
+    try {
+      await _downloadPreferences.clearCustomDownloadFolder();
+      final defaultFolder = await _downloadPreferences.defaultDownloadFolder();
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _downloadFolderController.text = defaultFolder.path;
+        _downloadFolderMessage = 'New downloads will use the default folder.';
+        _downloadFolderWarning = null;
+      });
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _downloadFolderMessage = null;
+        _downloadFolderWarning = 'Default folder could not be restored: $error';
       });
     }
   }
