@@ -73,6 +73,11 @@ class _LikedPageState extends ConsumerState<LikedPage> {
                               _playLiked(liked.tracks, downloads.tracks, index)
                         : null,
                     onDownload: () => downloads.downloadTrack(track.toTrack()),
+                    onDeleteDownload: download == null
+                        ? null
+                        : () => _confirmDeleteDownload(context, download, () {
+                            downloads.deleteTrack(download.trackId);
+                          }),
                     onUnlike: () => liked.unlikeTrack(track.trackId),
                   );
                 },
@@ -165,6 +170,7 @@ class _LikedTrackTile extends StatelessWidget {
     required this.isPlaying,
     required this.onPlay,
     required this.onDownload,
+    required this.onDeleteDownload,
     required this.onUnlike,
   });
 
@@ -174,6 +180,7 @@ class _LikedTrackTile extends StatelessWidget {
   final bool isPlaying;
   final VoidCallback? onPlay;
   final VoidCallback onDownload;
+  final VoidCallback? onDeleteDownload;
   final VoidCallback onUnlike;
 
   @override
@@ -181,6 +188,7 @@ class _LikedTrackTile extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final downloadState = download?.state;
     final isDownloaded = downloadState == DownloadState.complete;
+    final isQueued = downloadState == DownloadState.queued;
     final isDownloading = downloadState == DownloadState.downloading;
     final isUnavailableOffline = isOffline && !isDownloaded;
     final subtitle = [
@@ -224,32 +232,34 @@ class _LikedTrackTile extends StatelessWidget {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (isDownloading)
+              if (isQueued || isDownloading)
                 SizedBox.square(
                   dimension: 40,
                   child: Padding(
                     padding: const EdgeInsets.all(10),
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      value: download?.progress,
-                    ),
+                    child: isQueued
+                        ? const Icon(Icons.schedule)
+                        : CircularProgressIndicator(
+                            strokeWidth: 2,
+                            value: download?.progress,
+                          ),
                   ),
                 )
               else
                 IconButton(
                   tooltip: isDownloaded
-                      ? 'Downloaded'
+                      ? 'Delete local download'
                       : downloadState == DownloadState.failed
                       ? 'Retry download'
                       : 'Download track',
-                  onPressed: isDownloaded ? null : onDownload,
+                  onPressed: isDownloaded ? onDeleteDownload : onDownload,
                   icon: Icon(
                     isDownloaded
-                        ? Icons.download_done
+                        ? Icons.delete_outline
                         : downloadState == DownloadState.failed
                         ? Icons.refresh_outlined
                         : Icons.download_outlined,
-                    color: isDownloaded ? colorScheme.tertiary : null,
+                    color: isDownloaded ? colorScheme.error : null,
                   ),
                 ),
               IconButton(
@@ -297,6 +307,39 @@ class _PlayingTileFrame extends StatelessWidget {
       ),
       child: child,
     );
+  }
+}
+
+Future<void> _confirmDeleteDownload(
+  BuildContext context,
+  DownloadedTrack download,
+  VoidCallback onConfirm,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        title: const Text('Delete local download?'),
+        content: Text(
+          'Remove "${download.title}" from this device. It will stay in Liked and will not delete anything from Navidrome.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Delete local file'),
+          ),
+        ],
+      );
+    },
+  );
+
+  if (confirmed == true) {
+    onConfirm();
   }
 }
 

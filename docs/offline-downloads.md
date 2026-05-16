@@ -60,6 +60,10 @@ Current behavior:
 - Library track rows and search track rows have download buttons.
 - Album detail has a download-album button.
 - Album downloads skip tracks that are already downloaded.
+- Track and album downloads enter a queued state and are processed one at a time.
+- Interrupted in-progress downloads are repaired back into the queue on app load.
+- Queued and active downloads can be cancelled from Downloads.
+- Failed downloads can be retried individually or all together from Downloads.
 - Settings lets the user choose a custom download folder.
 - Settings can reset new downloads back to the default app support folder.
 - Downloaded tracks save minimal offline metadata: artist, album, song title, track number, local audio path, and local cover path when available.
@@ -86,7 +90,7 @@ Current behavior:
 - Download metadata persists in SQLite under the app support directory.
 - Existing SharedPreferences download metadata is imported into SQLite once.
 - Downloaded audio files live in the chosen download folder.
-- The Downloads tab shows downloading, complete, and failed states.
+- The Downloads tab shows queued, downloading, complete, and failed states.
 - Playback checks for a verified local file before falling back to the server stream.
 - Player and mini-player show whether playback is local or streaming.
 - Offline search can use downloaded metadata when Navidrome is unavailable.
@@ -96,7 +100,7 @@ Changing the download folder affects new downloads only. Existing downloads keep
 Still needed:
 
 - moving existing downloads to a new folder
-- stronger download job model
+- stronger multi-item download job model
 - richer offline search ranking
 
 ## App Downloads Versus Exports

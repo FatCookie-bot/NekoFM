@@ -2,6 +2,7 @@ import '../library/album.dart';
 import '../library/track.dart';
 
 enum DownloadState {
+  queued,
   downloading,
   complete,
   failed;

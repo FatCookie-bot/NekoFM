@@ -163,10 +163,12 @@ class MusicServerClient {
     String trackId,
     String savePath, {
     ProgressCallback? onReceiveProgress,
+    CancelToken? cancelToken,
   }) {
     return _dio.downloadUri(
       downloadUri(savedProfile, trackId),
       savePath,
+      cancelToken: cancelToken,
       onReceiveProgress: onReceiveProgress,
       options: Options(
         sendTimeout: const Duration(seconds: 10),

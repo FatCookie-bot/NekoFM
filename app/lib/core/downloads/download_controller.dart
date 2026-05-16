@@ -32,18 +32,36 @@ class DownloadController extends ChangeNotifier {
 
   List<DownloadedTrack> _tracks = const [];
   bool _isLoaded = false;
+  bool _isProcessingQueue = false;
+  Future<void>? _loadFuture;
+  String? _activeTrackId;
+  CancelToken? _activeCancelToken;
+  final Set<String> _cancelledTrackIds = {};
   DownloadRepairResult? _lastRepairResult;
 
   List<DownloadedTrack> get tracks => _tracks;
   bool get isLoaded => _isLoaded;
   DownloadRepairResult? get lastRepairResult => _lastRepairResult;
+  int get failedCount =>
+      _tracks.where((track) => track.state == DownloadState.failed).length;
 
   Future<void> load() async {
-    final repairResult = await _repository.repairDownloads();
-    _tracks = repairResult.tracks;
-    _lastRepairResult = repairResult;
-    _isLoaded = true;
-    notifyListeners();
+    if (_isLoaded) {
+      return;
+    }
+
+    final existingLoad = _loadFuture;
+    if (existingLoad != null) {
+      return existingLoad;
+    }
+
+    final loadFuture = _load();
+    _loadFuture = loadFuture;
+    try {
+      await loadFuture;
+    } finally {
+      _loadFuture = null;
+    }
   }
 
   Future<void> repair() async {
@@ -52,6 +70,16 @@ class DownloadController extends ChangeNotifier {
     _lastRepairResult = repairResult;
     _isLoaded = true;
     notifyListeners();
+    _processQueue();
+  }
+
+  Future<void> _load() async {
+    final repairResult = await _repository.repairDownloads();
+    _tracks = repairResult.tracks;
+    _lastRepairResult = repairResult;
+    _isLoaded = true;
+    notifyListeners();
+    _processQueue();
   }
 
   DownloadedTrack? trackState(String trackId) {
@@ -70,7 +98,9 @@ class DownloadController extends ChangeNotifier {
     }
 
     final existing = trackState(track.id);
-    if (existing?.state == DownloadState.downloading) {
+    if (existing?.state == DownloadState.queued ||
+        existing?.state == DownloadState.downloading) {
+      _processQueue();
       return;
     }
 
@@ -89,27 +119,72 @@ class DownloadController extends ChangeNotifier {
       return;
     }
 
-    final profile = await _profileStore.load();
-    if (profile == null || profile.password.isEmpty) {
-      _upsert(
-        DownloadedTrack.fromTrack(
-          track: track,
-          localPath: await _repository.localPathForTrack(track),
-          state: DownloadState.failed,
-        ).copyWith(errorMessage: 'Connect to your server in Settings first.'),
-      );
-      await _repository.saveTracks(_tracks);
+    final item = DownloadedTrack.fromTrack(
+      track: track,
+      localPath: await _repository.localPathForTrack(track),
+      state: DownloadState.queued,
+    ).copyWith(errorMessage: null);
+    _upsert(item);
+    await _repository.saveTracks(_tracks);
+    _processQueue();
+  }
+
+  Future<void> _processQueue() async {
+    if (!_isLoaded || _isProcessingQueue) {
       return;
     }
 
-    final localPath = await _repository.localPathForTrack(track);
-    final localCoverPath = await _downloadCover(track);
-    final partialPath = '$localPath.partial';
-    var item = DownloadedTrack.fromTrack(
-      track: track,
-      localPath: localPath,
+    _isProcessingQueue = true;
+    try {
+      while (true) {
+        final nextItem = _tracks
+            .where((track) => track.state == DownloadState.queued)
+            .firstOrNull;
+        if (nextItem == null) {
+          return;
+        }
+
+        await _downloadQueuedTrack(nextItem);
+      }
+    } finally {
+      _isProcessingQueue = false;
+    }
+  }
+
+  Future<void> _downloadQueuedTrack(DownloadedTrack queuedItem) async {
+    if (trackState(queuedItem.trackId)?.state != DownloadState.queued) {
+      return;
+    }
+
+    final profile = await _profileStore.load();
+    if (profile == null || profile.password.isEmpty) {
+      await _markFailed(
+        queuedItem,
+        'Connect to your server in Settings first.',
+      );
+      return;
+    }
+
+    final track = queuedItem.toTrack();
+    final cancelToken = CancelToken();
+    _activeTrackId = queuedItem.trackId;
+    _activeCancelToken = cancelToken;
+    final localCoverPath = await _downloadCover(track, cancelToken);
+    if (_isCancelled(queuedItem.trackId)) {
+      await _discardDownload(queuedItem);
+      _clearActiveDownload(queuedItem.trackId);
+      return;
+    }
+
+    final partialPath = '${queuedItem.localPath}.partial';
+    var item = queuedItem.copyWith(
       state: DownloadState.downloading,
-    ).copyWith(localCoverPath: localCoverPath);
+      updatedAt: DateTime.now(),
+      localCoverPath: localCoverPath,
+      receivedBytes: 0,
+      totalBytes: null,
+      errorMessage: null,
+    );
     _upsert(item);
     await _repository.saveTracks(_tracks);
 
@@ -121,9 +196,14 @@ class DownloadController extends ChangeNotifier {
 
       await _client.downloadTrack(
         profile,
-        track.id,
+        queuedItem.trackId,
         partialPath,
+        cancelToken: cancelToken,
         onReceiveProgress: (received, total) {
+          if (_isCancelled(queuedItem.trackId)) {
+            return;
+          }
+
           item = item.copyWith(
             state: DownloadState.downloading,
             updatedAt: DateTime.now(),
@@ -134,12 +214,17 @@ class DownloadController extends ChangeNotifier {
         },
       );
 
-      final completedFile = File(localPath);
+      if (_isCancelled(queuedItem.trackId)) {
+        await _discardDownload(item);
+        return;
+      }
+
+      final completedFile = File(queuedItem.localPath);
       if (await completedFile.exists()) {
         await completedFile.delete();
       }
 
-      await partialFile.rename(localPath);
+      await partialFile.rename(queuedItem.localPath);
       final size = await completedFile.length();
       if (size <= 0) {
         throw const FileSystemException('Downloaded file was empty.');
@@ -156,9 +241,21 @@ class DownloadController extends ChangeNotifier {
       _upsert(item);
       await _repository.saveTracks(_tracks);
     } on DioException catch (error) {
+      if (CancelToken.isCancel(error) || _isCancelled(queuedItem.trackId)) {
+        await _discardDownload(item);
+        return;
+      }
+
       await _markFailed(item, error.message ?? 'Download failed.');
     } on Object catch (error) {
+      if (_isCancelled(queuedItem.trackId)) {
+        await _discardDownload(item);
+        return;
+      }
+
       await _markFailed(item, 'Download failed: $error');
+    } finally {
+      _clearActiveDownload(queuedItem.trackId);
     }
   }
 
@@ -170,6 +267,43 @@ class DownloadController extends ChangeNotifier {
 
   Future<void> retryDownload(DownloadedTrack download) {
     return downloadTrack(download.toTrack());
+  }
+
+  Future<void> retryFailedDownloads() async {
+    final failedTracks = [
+      for (final track in _tracks)
+        if (track.state == DownloadState.failed) track.toTrack(),
+    ];
+
+    for (final track in failedTracks) {
+      await downloadTrack(track);
+    }
+  }
+
+  Future<void> cancelDownload(String trackId) async {
+    if (!_isLoaded) {
+      await load();
+    }
+
+    final existing = trackState(trackId);
+    if (existing == null ||
+        (existing.state != DownloadState.queued &&
+            existing.state != DownloadState.downloading)) {
+      return;
+    }
+
+    final isActiveDownload = _activeTrackId == trackId;
+    if (isActiveDownload) {
+      _cancelledTrackIds.add(trackId);
+      _activeCancelToken?.cancel('Download cancelled.');
+    } else if (existing.state == DownloadState.queued) {
+      await _discardDownload(existing);
+      return;
+    } else {
+      _cancelledTrackIds.add(trackId);
+    }
+
+    await _discardDownload(existing);
   }
 
   Future<void> deleteTrack(String trackId) async {
@@ -207,6 +341,39 @@ class DownloadController extends ChangeNotifier {
     }
   }
 
+  Future<void> _discardDownload(DownloadedTrack item) async {
+    final existing = trackState(item.trackId) ?? item;
+    final nextTracks = [
+      for (final track in _tracks)
+        if (track.trackId != item.trackId) track,
+    ];
+    final keepCover =
+        existing.localCoverPath != null &&
+        nextTracks.any(
+          (track) => track.localCoverPath == existing.localCoverPath,
+        );
+
+    await _repository.deleteDownloadedTrackFiles(
+      existing,
+      deleteCover: !keepCover,
+    );
+    _tracks = List.unmodifiable(nextTracks);
+    notifyListeners();
+    await _repository.saveTracks(_tracks);
+  }
+
+  bool _isCancelled(String trackId) => _cancelledTrackIds.contains(trackId);
+
+  void _clearActiveDownload(String trackId) {
+    if (_activeTrackId != trackId) {
+      return;
+    }
+
+    _activeTrackId = null;
+    _activeCancelToken = null;
+    _cancelledTrackIds.remove(trackId);
+  }
+
   Future<void> _markFailed(DownloadedTrack item, String message) async {
     _upsert(
       item.copyWith(
@@ -218,7 +385,10 @@ class DownloadController extends ChangeNotifier {
     await _repository.saveTracks(_tracks);
   }
 
-  Future<String?> _downloadCover(Track track) async {
+  Future<String?> _downloadCover(
+    Track track, [
+    CancelToken? cancelToken,
+  ]) async {
     final coverUri = track.coverArtUri;
     if (coverUri == null) {
       return null;
@@ -240,6 +410,7 @@ class DownloadController extends ChangeNotifier {
       await _dio.downloadUri(
         coverUri,
         partialPath,
+        cancelToken: cancelToken,
         options: Options(receiveTimeout: const Duration(seconds: 20)),
       );
 
@@ -263,5 +434,12 @@ class DownloadController extends ChangeNotifier {
     ]..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
     _tracks = List.unmodifiable(next);
     notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _activeCancelToken?.cancel('Download controller disposed.');
+    _dio.close(force: true);
+    super.dispose();
   }
 }

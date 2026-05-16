@@ -66,6 +66,16 @@ class DownloadRepository {
     var recoveredCoverCount = 0;
 
     for (final track in tracks) {
+      if (track.state == DownloadState.downloading) {
+        repairedTracks.add(
+          track.copyWith(
+            state: DownloadState.queued,
+            updatedAt: DateTime.now(),
+          ),
+        );
+        continue;
+      }
+
       if (track.state != DownloadState.complete) {
         repairedTracks.add(track);
         continue;
@@ -106,9 +116,20 @@ class DownloadRepository {
       repairedTracks.add(track);
     }
 
+    final recoveredQueueCount = repairedTracks.any(
+      (track) =>
+          track.state == DownloadState.queued &&
+          tracks.any(
+            (oldTrack) =>
+                oldTrack.trackId == track.trackId &&
+                oldTrack.state == DownloadState.downloading,
+          ),
+    );
+
     if (removedAudioCount > 0 ||
         clearedCoverCount > 0 ||
-        recoveredCoverCount > 0) {
+        recoveredCoverCount > 0 ||
+        recoveredQueueCount) {
       await saveTracks(repairedTracks);
     }
 

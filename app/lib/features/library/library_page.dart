@@ -734,7 +734,7 @@ class _AlbumDownloadTile extends StatelessWidget {
         : state.hasMissingCovers
         ? '${state.missingCoverCount} local covers missing'
         : state.hasActiveDownloads
-        ? '${state.downloadingCount} downloading • ${state.completeCount}/${state.totalCount} saved'
+        ? '${state.activeDownloadSummary} • ${state.completeCount}/${state.totalCount} saved'
         : '${state.remainingCount} tracks not saved yet';
 
     return ListTile(
@@ -777,22 +777,29 @@ class _AlbumDownloadState {
   const _AlbumDownloadState({
     required this.totalCount,
     required this.completeCount,
+    required this.queuedCount,
     required this.downloadingCount,
     required this.missingCoverCount,
   });
 
   final int totalCount;
   final int completeCount;
+  final int queuedCount;
   final int downloadingCount;
   final int missingCoverCount;
 
-  int get remainingCount => totalCount - completeCount - downloadingCount;
+  int get remainingCount =>
+      totalCount - completeCount - queuedCount - downloadingCount;
   double get progress => totalCount <= 0 ? 0 : completeCount / totalCount;
   bool get isComplete =>
       totalCount > 0 && completeCount == totalCount && missingCoverCount == 0;
-  bool get hasActiveDownloads => downloadingCount > 0;
+  bool get hasActiveDownloads => queuedCount > 0 || downloadingCount > 0;
   bool get hasMissingCovers =>
       totalCount > 0 && completeCount == totalCount && missingCoverCount > 0;
+  String get activeDownloadSummary => [
+    if (queuedCount > 0) '$queuedCount queued',
+    if (downloadingCount > 0) '$downloadingCount downloading',
+  ].join(' • ');
 
   String get buttonLabel {
     if (isComplete) {
@@ -804,7 +811,7 @@ class _AlbumDownloadState {
     }
 
     if (hasActiveDownloads) {
-      return 'Downloading album';
+      return queuedCount > 0 ? 'Album queued' : 'Downloading album';
     }
 
     if (completeCount > 0) {
@@ -819,6 +826,7 @@ class _AlbumDownloadState {
     DownloadController downloads,
   ) {
     var completeCount = 0;
+    var queuedCount = 0;
     var downloadingCount = 0;
     var missingCoverCount = 0;
     for (final track in tracks) {
@@ -829,6 +837,8 @@ class _AlbumDownloadState {
         if (track.coverArtUri != null && download?.localCoverPath == null) {
           missingCoverCount += 1;
         }
+      } else if (state == DownloadState.queued) {
+        queuedCount += 1;
       } else if (state == DownloadState.downloading) {
         downloadingCount += 1;
       }
@@ -837,6 +847,7 @@ class _AlbumDownloadState {
     return _AlbumDownloadState(
       totalCount: tracks.length,
       completeCount: completeCount,
+      queuedCount: queuedCount,
       downloadingCount: downloadingCount,
       missingCoverCount: missingCoverCount,
     );
@@ -1010,19 +1021,22 @@ class _TrackActions extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = download?.state;
+    final isQueued = state == DownloadState.queued;
     final isDownloading = state == DownloadState.downloading;
     final isComplete = state == DownloadState.complete;
     final isFailed = state == DownloadState.failed;
 
-    if (isDownloading) {
+    if (isQueued || isDownloading) {
       return SizedBox.square(
         dimension: 40,
         child: Padding(
           padding: const EdgeInsets.all(10),
-          child: CircularProgressIndicator(
-            strokeWidth: 2,
-            value: download?.progress,
-          ),
+          child: isQueued
+              ? const Icon(Icons.schedule)
+              : CircularProgressIndicator(
+                  strokeWidth: 2,
+                  value: download?.progress,
+                ),
         ),
       );
     }

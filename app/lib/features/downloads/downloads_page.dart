@@ -50,6 +50,8 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
             _DownloadsToolbar(
               repairMessage: _repairMessage(controller.lastRepairResult),
               onRepair: controller.repair,
+              failedCount: controller.failedCount,
+              onRetryFailed: controller.retryFailedDownloads,
             ),
             const SizedBox(height: 8),
             Expanded(
@@ -65,6 +67,9 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
                     onPlay: () => _playDownload(controller.tracks, index),
                     onRetry: () =>
                         controller.retryDownload(controller.tracks[index]),
+                    onCancel: () => controller.cancelDownload(
+                      controller.tracks[index].trackId,
+                    ),
                     onDelete: () => _confirmDeleteDownload(
                       context,
                       controller.tracks[index],
@@ -105,9 +110,16 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
 }
 
 class _DownloadsToolbar extends StatelessWidget {
-  const _DownloadsToolbar({required this.onRepair, this.repairMessage});
+  const _DownloadsToolbar({
+    required this.onRepair,
+    required this.failedCount,
+    required this.onRetryFailed,
+    this.repairMessage,
+  });
 
   final VoidCallback onRepair;
+  final int failedCount;
+  final VoidCallback onRetryFailed;
   final String? repairMessage;
 
   @override
@@ -131,6 +143,14 @@ class _DownloadsToolbar extends StatelessWidget {
           const SizedBox(width: 8),
         ] else
           const Spacer(),
+        if (failedCount > 0) ...[
+          OutlinedButton.icon(
+            onPressed: onRetryFailed,
+            icon: const Icon(Icons.restart_alt_outlined),
+            label: Text('Retry failed ($failedCount)'),
+          ),
+          const SizedBox(width: 8),
+        ],
         OutlinedButton.icon(
           onPressed: onRepair,
           icon: const Icon(Icons.refresh_outlined),
@@ -163,6 +183,7 @@ class _DownloadTile extends StatelessWidget {
     required this.isPlaying,
     required this.onPlay,
     required this.onRetry,
+    required this.onCancel,
     required this.onDelete,
   });
 
@@ -170,17 +191,20 @@ class _DownloadTile extends StatelessWidget {
   final bool isPlaying;
   final VoidCallback onPlay;
   final VoidCallback onRetry;
+  final VoidCallback onCancel;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final stateIcon = switch (download.state) {
+      DownloadState.queued => Icons.schedule,
       DownloadState.downloading => Icons.downloading,
       DownloadState.complete => Icons.download_done,
       DownloadState.failed => Icons.error_outline,
     };
     final stateColor = switch (download.state) {
+      DownloadState.queued => colorScheme.primary,
       DownloadState.downloading => colorScheme.primary,
       DownloadState.complete => colorScheme.tertiary,
       DownloadState.failed => colorScheme.error,
@@ -189,6 +213,7 @@ class _DownloadTile extends StatelessWidget {
       download.artist,
       if (download.albumName != null) download.albumName!,
       formatPlaybackDuration(Duration(seconds: download.durationSeconds)),
+      if (download.state == DownloadState.queued) 'Queued',
       if (download.bytes != null) _formatBytes(download.bytes!),
     ].join(' • ');
 
@@ -206,6 +231,14 @@ class _DownloadTile extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+            if (download.state == DownloadState.queued)
+              Padding(
+                padding: const EdgeInsets.only(top: 4),
+                child: Text(
+                  'Waiting for the download queue.',
+                  style: TextStyle(color: colorScheme.primary),
+                ),
+              ),
             if (download.state == DownloadState.downloading)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
@@ -248,13 +281,19 @@ class _DownloadTile extends StatelessWidget {
                     : Icons.folder_outlined,
               ),
             ),
-            IconButton(
-              tooltip: 'Delete local download',
-              onPressed: download.state == DownloadState.downloading
-                  ? null
-                  : onDelete,
-              icon: const Icon(Icons.close),
-            ),
+            if (download.state == DownloadState.queued ||
+                download.state == DownloadState.downloading)
+              IconButton(
+                tooltip: 'Cancel download',
+                onPressed: onCancel,
+                icon: const Icon(Icons.close),
+              )
+            else
+              IconButton(
+                tooltip: 'Delete local download',
+                onPressed: onDelete,
+                icon: const Icon(Icons.close),
+              ),
           ],
         ),
         onTap: download.state == DownloadState.complete ? onPlay : null,

@@ -268,6 +268,21 @@ void main() {
     expect(track.coverArtUri?.isScheme('file'), isTrue);
   });
 
+  test('parses queued download state', () {
+    final download = DownloadedTrack.fromJson(const {
+      'trackId': 'track-1',
+      'title': 'Sonne',
+      'artist': 'Rammstein',
+      'trackNumber': 3,
+      'durationSeconds': 272,
+      'localPath': '/tmp/Sonne.flac',
+      'state': 'queued',
+      'updatedAt': '2026-05-16T12:00:00.000',
+    });
+
+    expect(download.state, DownloadState.queued);
+  });
+
   test('can clear stale downloaded cover metadata', () {
     final download = DownloadedTrack.fromJson(const {
       'trackId': 'track-1',
@@ -330,6 +345,38 @@ void main() {
     expect(repairResult.tracks.single.localCoverPath, coverFile.path);
     expect(details.single.album.coverArtUri, Uri.file(coverFile.path));
     expect(details.single.tracks.single.coverArtUri, Uri.file(coverFile.path));
+  });
+
+  test('repairs interrupted downloads back to queued', () async {
+    SharedPreferencesAsyncPlatform.instance =
+        InMemorySharedPreferencesAsync.empty();
+    addTearDown(() {
+      SharedPreferencesAsyncPlatform.instance = null;
+    });
+
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
+    final repository = DownloadRepository(
+      preferences: SharedPreferencesAsync(),
+      database: database,
+    );
+    await repository.saveTracks([
+      DownloadedTrack(
+        trackId: 'track-1',
+        title: 'Sonne',
+        artist: 'Rammstein',
+        trackNumber: 3,
+        durationSeconds: 272,
+        localPath: '/tmp/Sonne.flac',
+        state: DownloadState.downloading,
+        updatedAt: DateTime(2026, 5, 16),
+      ),
+    ]);
+
+    final repairResult = await repository.repairDownloads();
+
+    expect(repairResult.tracks.single.state, DownloadState.queued);
+    expect((await repository.loadTracks()).single.state, DownloadState.queued);
   });
 
   test('searches downloaded album metadata offline', () async {
