@@ -162,8 +162,20 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
     final query = value.trim();
     setState(() {
       _searchQuery = query;
-      _searchFuture = query.length < 2 ? null : _repository.search(query);
+      _searchFuture = query.length < 2 ? null : _searchWithFallback(query);
     });
+  }
+
+  Future<LibrarySearchResult> _searchWithFallback(String query) async {
+    if (_isShowingDownloadedLibrary) {
+      return _downloadRepository.searchDownloaded(query);
+    }
+
+    try {
+      return await _repository.search(query);
+    } on Object {
+      return _downloadRepository.searchDownloaded(query);
+    }
   }
 
   void _clearSearch() {
@@ -188,6 +200,23 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
   Future<void> _playSearchTrack(Track track) async {
     final albumId = track.albumId;
     if (albumId != null && albumId.isNotEmpty) {
+      final downloadedDetail = _downloadedAlbumDetails[albumId];
+      if (downloadedDetail != null) {
+        final index = downloadedDetail.tracks.indexWhere(
+          (item) => item.id == track.id,
+        );
+        if (index >= 0) {
+          await ref
+              .read(playerControllerProvider)
+              .playAlbum(
+                album: downloadedDetail.album,
+                tracks: downloadedDetail.tracks,
+                startIndex: index,
+              );
+          return;
+        }
+      }
+
       try {
         final detail = await _repository.getAlbum(albumId);
         final index = detail.tracks.indexWhere((item) => item.id == track.id);
@@ -679,7 +708,22 @@ class _AlbumDownloadTile extends StatelessWidget {
         color: state.isComplete ? colorScheme.tertiary : colorScheme.primary,
       ),
       title: Text(state.buttonLabel),
-      subtitle: Text(subtitle),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(subtitle),
+          if (!state.isComplete && state.completeCount > 0) ...[
+            const SizedBox(height: 8),
+            LinearProgressIndicator(
+              value: state.progress,
+              minHeight: 4,
+              semanticsLabel: 'Album download progress',
+              semanticsValue:
+                  '${state.completeCount} of ${state.totalCount} tracks saved',
+            ),
+          ],
+        ],
+      ),
       trailing: FilledButton.icon(
         onPressed: isDisabled
             ? null
@@ -707,6 +751,7 @@ class _AlbumDownloadState {
   final int missingCoverCount;
 
   int get remainingCount => totalCount - completeCount - downloadingCount;
+  double get progress => totalCount <= 0 ? 0 : completeCount / totalCount;
   bool get isComplete =>
       totalCount > 0 && completeCount == totalCount && missingCoverCount == 0;
   bool get hasActiveDownloads => downloadingCount > 0;
@@ -895,6 +940,7 @@ class _TrackActions extends StatelessWidget {
     final state = download?.state;
     final isDownloading = state == DownloadState.downloading;
     final isComplete = state == DownloadState.complete;
+    final isFailed = state == DownloadState.failed;
 
     if (isDownloading) {
       return SizedBox.square(
@@ -913,9 +959,19 @@ class _TrackActions extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         IconButton(
-          tooltip: isComplete ? 'Delete local download' : 'Download track',
+          tooltip: isComplete
+              ? 'Delete local download'
+              : isFailed
+              ? 'Retry download'
+              : 'Download track',
           onPressed: isComplete ? onDelete : onDownload,
-          icon: Icon(isComplete ? Icons.close : Icons.download_outlined),
+          icon: Icon(
+            isComplete
+                ? Icons.close
+                : isFailed
+                ? Icons.refresh_outlined
+                : Icons.download_outlined,
+          ),
         ),
         const Icon(Icons.play_arrow_outlined),
       ],

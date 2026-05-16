@@ -32,12 +32,24 @@ class DownloadController extends ChangeNotifier {
 
   List<DownloadedTrack> _tracks = const [];
   bool _isLoaded = false;
+  DownloadRepairResult? _lastRepairResult;
 
   List<DownloadedTrack> get tracks => _tracks;
   bool get isLoaded => _isLoaded;
+  DownloadRepairResult? get lastRepairResult => _lastRepairResult;
 
   Future<void> load() async {
-    _tracks = await _repository.loadTracks();
+    final repairResult = await _repository.repairDownloads();
+    _tracks = repairResult.tracks;
+    _lastRepairResult = repairResult;
+    _isLoaded = true;
+    notifyListeners();
+  }
+
+  Future<void> repair() async {
+    final repairResult = await _repository.repairDownloads();
+    _tracks = repairResult.tracks;
+    _lastRepairResult = repairResult;
     _isLoaded = true;
     notifyListeners();
   }
@@ -154,6 +166,10 @@ class DownloadController extends ChangeNotifier {
     for (final track in tracks) {
       await downloadTrack(track);
     }
+  }
+
+  Future<void> retryDownload(DownloadedTrack download) {
+    return downloadTrack(download.toTrack());
   }
 
   Future<void> deleteTrack(String trackId) async {

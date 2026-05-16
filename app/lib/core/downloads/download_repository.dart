@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../library/album.dart';
 import '../library/album_detail.dart';
+import '../library/library_search_result.dart';
 import '../library/track.dart';
 import 'download_preferences.dart';
 import 'downloaded_track.dart';
@@ -44,6 +45,45 @@ class DownloadRepository {
     } on FormatException {
       return const [];
     }
+  }
+
+  Future<DownloadRepairResult> repairDownloads() async {
+    final tracks = await loadTracks();
+    final repairedTracks = <DownloadedTrack>[];
+    var removedAudioCount = 0;
+    var clearedCoverCount = 0;
+
+    for (final track in tracks) {
+      if (track.state != DownloadState.complete) {
+        repairedTracks.add(track);
+        continue;
+      }
+
+      if (!await _isUsableFile(track.localPath, expectedBytes: track.bytes)) {
+        removedAudioCount += 1;
+        await deleteDownloadedTrackFiles(track);
+        continue;
+      }
+
+      final coverPath = track.localCoverPath;
+      if (coverPath != null && !await _isUsableFile(coverPath)) {
+        repairedTracks.add(track.copyWith(clearLocalCoverPath: true));
+        clearedCoverCount += 1;
+        continue;
+      }
+
+      repairedTracks.add(track);
+    }
+
+    if (removedAudioCount > 0 || clearedCoverCount > 0) {
+      await saveTracks(repairedTracks);
+    }
+
+    return DownloadRepairResult(
+      tracks: repairedTracks,
+      removedAudioCount: removedAudioCount,
+      clearedCoverCount: clearedCoverCount,
+    );
   }
 
   Future<void> saveTracks(List<DownloadedTrack> tracks) async {
@@ -102,6 +142,28 @@ class DownloadRepository {
     return file.path;
   }
 
+  Future<bool> _isUsableFile(String path, {int? expectedBytes}) async {
+    if (path.isEmpty) {
+      return false;
+    }
+
+    final file = File(path);
+    if (!await file.exists()) {
+      return false;
+    }
+
+    final size = await file.length();
+    if (size <= 0) {
+      return false;
+    }
+
+    if (expectedBytes != null && expectedBytes != size) {
+      return false;
+    }
+
+    return true;
+  }
+
   Future<Directory> downloadsDirectory() async {
     final directory = await _downloadPreferences.activeDownloadFolder();
     if (!await directory.exists()) {
@@ -132,8 +194,11 @@ class DownloadRepository {
   Future<Directory> albumDirectoryForTrack(Track track) async {
     final root = await downloadsDirectory();
     final albumName = track.albumName ?? 'Unknown Album';
-    final folderName = _safeFilename('${track.artist} - $albumName');
-    final directory = Directory('${root.path}/$folderName');
+    final artistFolderName = _safeFilename(track.artist);
+    final albumFolderName = _safeFilename(albumName);
+    final directory = Directory(
+      '${root.path}/$artistFolderName/$albumFolderName',
+    );
     if (!await directory.exists()) {
       await directory.create(recursive: true);
     }
@@ -143,7 +208,7 @@ class DownloadRepository {
 
   Future<List<AlbumDetail>> loadDownloadedAlbumDetails() async {
     final tracks = <DownloadedTrack>[];
-    for (final track in await loadTracks()) {
+    for (final track in (await repairDownloads()).tracks) {
       if (track.state != DownloadState.complete) {
         continue;
       }
@@ -193,6 +258,45 @@ class DownloadRepository {
 
     details.sort((left, right) => left.album.name.compareTo(right.album.name));
     return details;
+  }
+
+  Future<LibrarySearchResult> searchDownloaded(String query) async {
+    final lowerQuery = query.toLowerCase().trim();
+    final normalizedQuery = _normalizeSearchText(query);
+    if (lowerQuery.length < 2) {
+      return const LibrarySearchResult(albums: [], tracks: []);
+    }
+
+    final details = await loadDownloadedAlbumDetails();
+    final albums = <Album>[];
+    final tracks = <Track>[];
+
+    for (final detail in details) {
+      final album = detail.album;
+      final albumMatches = _matchesSearch(
+        lowerQuery,
+        normalizedQuery,
+        album.name,
+        album.artist,
+      );
+      if (albumMatches) {
+        albums.add(album);
+      }
+
+      for (final track in detail.tracks) {
+        if (_matchesSearch(
+          lowerQuery,
+          normalizedQuery,
+          track.title,
+          track.artist,
+          track.albumName ?? album.name,
+        )) {
+          tracks.add(track);
+        }
+      }
+    }
+
+    return LibrarySearchResult(albums: albums, tracks: tracks);
   }
 
   Future<void> _writeFolderManifests(List<DownloadedTrack> tracks) async {
@@ -247,7 +351,7 @@ class DownloadRepository {
   static String albumFolderNameForTest({
     required String artist,
     required String albumName,
-  }) => _safeFilename('$artist - $albumName');
+  }) => '${_safeFilename(artist)}/${_safeFilename(albumName)}';
 
   static String _safeFilename(String value) {
     final cleaned = value.replaceAll(RegExp(r'[^A-Za-z0-9._-]+'), '_');
@@ -270,4 +374,43 @@ class DownloadRepository {
 
     return extension;
   }
+
+  static bool _matchesSearch(
+    String lowerQuery,
+    String normalizedQuery,
+    String first, [
+    String? second,
+    String? third,
+  ]) {
+    final normalizedMatches =
+        normalizedQuery.isNotEmpty &&
+        (_normalizeSearchText(first).contains(normalizedQuery) ||
+            _normalizeSearchText(second ?? '').contains(normalizedQuery) ||
+            _normalizeSearchText(third ?? '').contains(normalizedQuery));
+    return first.toLowerCase().contains(lowerQuery) ||
+        (second ?? '').toLowerCase().contains(lowerQuery) ||
+        (third ?? '').toLowerCase().contains(lowerQuery) ||
+        normalizedMatches;
+  }
+
+  static String _normalizeSearchText(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[\s\-_.,:;()[\]{}]+'), ' ')
+        .trim();
+  }
+}
+
+class DownloadRepairResult {
+  const DownloadRepairResult({
+    required this.tracks,
+    required this.removedAudioCount,
+    required this.clearedCoverCount,
+  });
+
+  final List<DownloadedTrack> tracks;
+  final int removedAudioCount;
+  final int clearedCoverCount;
+
+  bool get changed => removedAudioCount > 0 || clearedCoverCount > 0;
 }

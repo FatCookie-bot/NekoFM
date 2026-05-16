@@ -34,6 +34,7 @@ class PlayerPage extends ConsumerWidget {
                   albumName: controller.album?.name ?? 'Unknown album',
                   artistName: controller.album?.artist,
                   coverArtUri: controller.album?.coverArtUri,
+                  source: controller.sourceAt(indexSnapshot.data),
                   isLoading: controller.isLoading,
                   errorMessage: controller.errorMessage,
                 ),
@@ -93,6 +94,7 @@ class _NowPlayingHeader extends StatelessWidget {
     required this.albumName,
     required this.artistName,
     required this.coverArtUri,
+    required this.source,
     required this.isLoading,
     required this.errorMessage,
   });
@@ -101,6 +103,7 @@ class _NowPlayingHeader extends StatelessWidget {
   final String albumName;
   final String? artistName;
   final Uri? coverArtUri;
+  final PlaybackSource? source;
   final bool isLoading;
   final String? errorMessage;
 
@@ -141,6 +144,10 @@ class _NowPlayingHeader extends StatelessWidget {
                     color: colorScheme.onSurfaceVariant,
                   ),
                 ),
+                if (source != null) ...[
+                  const SizedBox(height: 8),
+                  _PlaybackSourceChip(source: source!),
+                ],
                 if (isLoading || errorMessage != null) ...[
                   const SizedBox(height: 8),
                   Text(
@@ -153,6 +160,43 @@ class _NowPlayingHeader extends StatelessWidget {
                   ),
                 ],
               ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PlaybackSourceChip extends StatelessWidget {
+  const _PlaybackSourceChip({required this.source});
+
+  final PlaybackSource source;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(6),
+        color: colorScheme.surfaceContainerHighest,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            source == PlaybackSource.local
+                ? Icons.offline_pin_outlined
+                : Icons.cloud_queue,
+            size: 16,
+            color: colorScheme.primary,
+          ),
+          const SizedBox(width: 6),
+          Text(
+            source.label,
+            style: Theme.of(context).textTheme.labelMedium?.copyWith(
+              color: colorScheme.onSurfaceVariant,
             ),
           ),
         ],

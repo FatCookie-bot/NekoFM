@@ -29,6 +29,7 @@ class MiniPlayer extends ConsumerWidget {
             return _MiniPlayerSurface(
               controller: controller,
               track: controller.trackAt(indexSnapshot.data),
+              source: controller.sourceAt(indexSnapshot.data),
               onOpenPlayer: onOpenPlayer,
             );
           },
@@ -42,11 +43,13 @@ class _MiniPlayerSurface extends StatelessWidget {
   const _MiniPlayerSurface({
     required this.controller,
     required this.track,
+    required this.source,
     required this.onOpenPlayer,
   });
 
   final PlayerController controller;
   final Track? track;
+  final PlaybackSource? source;
   final VoidCallback onOpenPlayer;
 
   @override
@@ -88,12 +91,26 @@ class _MiniPlayerSurface extends StatelessWidget {
                             style: Theme.of(context).textTheme.titleSmall,
                           ),
                           const SizedBox(height: 2),
-                          Text(
-                            track?.artist ?? controller.album?.artist ?? '',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: colorScheme.onSurfaceVariant),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  track?.artist ??
+                                      controller.album?.artist ??
+                                      '',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: Theme.of(context).textTheme.bodySmall
+                                      ?.copyWith(
+                                        color: colorScheme.onSurfaceVariant,
+                                      ),
+                                ),
+                              ),
+                              if (source != null) ...[
+                                const SizedBox(width: 8),
+                                _MiniSourceLabel(source: source!),
+                              ],
+                            ],
                           ),
                         ],
                       ),
@@ -106,6 +123,41 @@ class _MiniPlayerSurface extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _MiniSourceLabel extends StatelessWidget {
+  const _MiniSourceLabel({required this.source});
+
+  final PlaybackSource source;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Tooltip(
+      message: source == PlaybackSource.local
+          ? 'Playing from local download'
+          : 'Streaming from server',
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            source == PlaybackSource.local
+                ? Icons.offline_pin_outlined
+                : Icons.cloud_queue,
+            size: 14,
+            color: colorScheme.primary,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            source.label,
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/downloads/download_controller.dart';
+import '../../core/downloads/download_repository.dart';
 import '../../core/downloads/downloaded_track.dart';
 import '../../core/player/player_controller.dart';
 import '../player/playback_formatting.dart';
@@ -31,27 +32,47 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
         }
 
         if (controller.tracks.isEmpty) {
-          return const _DownloadsMessage(
+          return _DownloadsMessage(
             icon: Icons.download_outlined,
             title: 'No downloads yet',
-            message: 'Download tracks from Library to play them offline.',
+            message:
+                _repairMessage(controller.lastRepairResult) ??
+                'Download tracks from Library to play them offline.',
+            actionLabel: 'Recheck',
+            onAction: controller.repair,
           );
         }
 
-        return ListView.separated(
-          itemCount: controller.tracks.length,
-          separatorBuilder: (_, _) => const Divider(height: 1),
-          itemBuilder: (context, index) {
-            return _DownloadTile(
-              download: controller.tracks[index],
-              onPlay: () => _playDownload(controller.tracks, index),
-              onDelete: () => _confirmDeleteDownload(
-                context,
-                controller.tracks[index],
-                () => controller.deleteTrack(controller.tracks[index].trackId),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _DownloadsToolbar(
+              repairMessage: _repairMessage(controller.lastRepairResult),
+              onRepair: controller.repair,
+            ),
+            const SizedBox(height: 8),
+            Expanded(
+              child: ListView.separated(
+                itemCount: controller.tracks.length,
+                separatorBuilder: (_, _) => const Divider(height: 1),
+                itemBuilder: (context, index) {
+                  return _DownloadTile(
+                    download: controller.tracks[index],
+                    onPlay: () => _playDownload(controller.tracks, index),
+                    onRetry: () =>
+                        controller.retryDownload(controller.tracks[index]),
+                    onDelete: () => _confirmDeleteDownload(
+                      context,
+                      controller.tracks[index],
+                      () => controller.deleteTrack(
+                        controller.tracks[index].trackId,
+                      ),
+                    ),
+                  );
+                },
               ),
-            );
-          },
+            ),
+          ],
         );
       },
     );
@@ -79,15 +100,68 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
   }
 }
 
+class _DownloadsToolbar extends StatelessWidget {
+  const _DownloadsToolbar({required this.onRepair, this.repairMessage});
+
+  final VoidCallback onRepair;
+  final String? repairMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Row(
+      children: [
+        if (repairMessage != null) ...[
+          Icon(Icons.build_outlined, size: 18, color: colorScheme.tertiary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              repairMessage!,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+        ] else
+          const Spacer(),
+        OutlinedButton.icon(
+          onPressed: onRepair,
+          icon: const Icon(Icons.refresh_outlined),
+          label: const Text('Recheck'),
+        ),
+      ],
+    );
+  }
+}
+
+String? _repairMessage(DownloadRepairResult? repairResult) {
+  if (repairResult == null || !repairResult.changed) {
+    return null;
+  }
+
+  final parts = <String>[
+    if (repairResult.removedAudioCount > 0)
+      '${repairResult.removedAudioCount} missing audio removed',
+    if (repairResult.clearedCoverCount > 0)
+      '${repairResult.clearedCoverCount} missing covers cleared',
+  ];
+  return 'Repaired ${parts.join(' • ')}.';
+}
+
 class _DownloadTile extends StatelessWidget {
   const _DownloadTile({
     required this.download,
     required this.onPlay,
+    required this.onRetry,
     required this.onDelete,
   });
 
   final DownloadedTrack download;
   final VoidCallback onPlay;
+  final VoidCallback onRetry;
   final VoidCallback onDelete;
 
   @override
@@ -139,6 +213,12 @@ class _DownloadTile extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (download.state == DownloadState.failed)
+            IconButton(
+              tooltip: 'Retry download',
+              onPressed: onRetry,
+              icon: const Icon(Icons.refresh_outlined),
+            ),
           IconButton(
             tooltip: download.state == DownloadState.complete
                 ? 'Play downloaded track'
@@ -210,11 +290,15 @@ class _DownloadsMessage extends StatelessWidget {
     required this.icon,
     required this.title,
     required this.message,
+    this.actionLabel,
+    this.onAction,
   });
 
   final IconData icon;
   final String title;
   final String message;
+  final String? actionLabel;
+  final VoidCallback? onAction;
 
   @override
   Widget build(BuildContext context) {
@@ -240,6 +324,14 @@ class _DownloadsMessage extends StatelessWidget {
                 color: colorScheme.onSurfaceVariant,
               ),
             ),
+            if (actionLabel != null && onAction != null) ...[
+              const SizedBox(height: 16),
+              OutlinedButton.icon(
+                onPressed: onAction,
+                icon: const Icon(Icons.refresh_outlined),
+                label: Text(actionLabel!),
+              ),
+            ],
           ],
         ),
       ),

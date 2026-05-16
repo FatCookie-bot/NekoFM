@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:app/core/downloads/download_repository.dart';
@@ -12,6 +13,9 @@ import 'package:app/core/server/secure_server_profile_store.dart';
 import 'package:app/features/player/playback_formatting.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
 void main() {
   test('parses Subsonic album summary', () {
@@ -232,7 +236,7 @@ void main() {
         artist: 'Red Hot Chili Peppers',
         albumName: 'Blood Sugar Sex Magik',
       ),
-      'Red_Hot_Chili_Peppers_-_Blood_Sugar_Sex_Magik',
+      'Red_Hot_Chili_Peppers/Blood_Sugar_Sex_Magik',
     );
   });
 
@@ -258,6 +262,62 @@ void main() {
     expect(track.trackNumber, 3);
     expect(track.albumName, 'Mutter');
     expect(track.coverArtUri?.isScheme('file'), isTrue);
+  });
+
+  test('can clear stale downloaded cover metadata', () {
+    final download = DownloadedTrack.fromJson(const {
+      'trackId': 'track-1',
+      'title': 'Sonne',
+      'artist': 'Rammstein',
+      'trackNumber': 3,
+      'durationSeconds': 272,
+      'localPath': '/tmp/Sonne.flac',
+      'localCoverPath': '/tmp/cover.jpg',
+      'state': 'complete',
+      'updatedAt': '2026-05-16T12:00:00.000',
+    });
+
+    expect(download.localCoverPath, '/tmp/cover.jpg');
+    expect(download.copyWith(clearLocalCoverPath: true).localCoverPath, isNull);
+  });
+
+  test('searches downloaded album metadata offline', () async {
+    SharedPreferencesAsyncPlatform.instance =
+        InMemorySharedPreferencesAsync.empty();
+    final directory = await Directory.systemTemp.createTemp('nekofm-test-');
+    addTearDown(() async {
+      SharedPreferencesAsyncPlatform.instance = null;
+      if (await directory.exists()) {
+        await directory.delete(recursive: true);
+      }
+    });
+
+    final audioFile = File('${directory.path}/01 - Sonne.flac');
+    await audioFile.writeAsBytes([1, 2, 3, 4]);
+    final repository = DownloadRepository(
+      preferences: SharedPreferencesAsync(),
+    );
+    await repository.saveTracks([
+      DownloadedTrack(
+        trackId: 'track-1',
+        title: 'Sonne',
+        artist: 'Rammstein',
+        trackNumber: 3,
+        durationSeconds: 272,
+        localPath: audioFile.path,
+        state: DownloadState.complete,
+        updatedAt: DateTime(2026, 5, 16),
+        albumId: 'album-1',
+        albumName: 'Mutter',
+        suffix: 'flac',
+        bytes: 4,
+      ),
+    ]);
+
+    final result = await repository.searchDownloaded('mutter');
+
+    expect(result.albums.single.name, 'Mutter');
+    expect(result.tracks.single.title, 'Sonne');
   });
 
   test('decides when back restarts the current track', () {

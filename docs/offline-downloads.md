@@ -63,8 +63,8 @@ Current behavior:
 - Settings lets the user choose a custom download folder.
 - Settings can reset new downloads back to the default app support folder.
 - Downloaded tracks save minimal offline metadata: artist, album, song title, track number, local audio path, and local cover path when available.
-- New downloads are stored in per-album folders inside the chosen download folder.
-- Album folders are named from artist and album.
+- New downloads are stored as `Artist/Album/` folders inside the chosen download folder.
+- Artist folders contain their album folders.
 - Album folders use one shared `cover.jpg`, not one cover per track.
 - Download folders receive a `nekofm_downloads_manifest.json` manifest.
 - Cover art is downloaded beside tracks when available.
@@ -74,6 +74,12 @@ Current behavior:
 - Fully downloaded album button changes to delete album.
 - Local deletes remove NekoFM audio files, cover files, partial files, and metadata only.
 - Local deletes never delete Navidrome/server/source music.
+- Downloads automatically repairs stale metadata when loading.
+- Downloads has a manual Recheck button.
+- Missing local audio removes the download entry.
+- Missing local cover clears the cover path so the app can offer Download covers again.
+- Failed downloads show retry buttons in Downloads.
+- Failed track actions in Library change to retry.
 - Downloads are written to a `.partial` file first.
 - The partial file is renamed only after the HTTP download succeeds.
 - The completed file is verified to exist and be non-empty.
@@ -86,7 +92,6 @@ Changing the download folder affects new downloads only. Existing downloads keep
 
 Still needed:
 
-- retry controls
 - moving existing downloads to a new folder
 - stronger download job model
 - Drift/SQLite persistence

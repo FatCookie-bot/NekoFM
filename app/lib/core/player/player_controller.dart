@@ -38,6 +38,7 @@ class PlayerController extends ChangeNotifier {
   final PlaybackPreferences _playbackPreferences;
 
   List<Track> _queue = const [];
+  List<PlaybackSource> _queueSources = const [];
   Album? _album;
   String? _errorMessage;
   bool _isLoading = false;
@@ -56,6 +57,14 @@ class PlayerController extends ChangeNotifier {
     return _queue[index];
   }
 
+  PlaybackSource? sourceAt(int? index) {
+    if (index == null || index < 0 || index >= _queueSources.length) {
+      return null;
+    }
+
+    return _queueSources[index];
+  }
+
   Future<void> playAlbum({
     required Album album,
     required List<Track> tracks,
@@ -72,9 +81,16 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
 
     try {
+      final resolvedSources = [
+        for (final track in tracks) await _sourceForTrack(track),
+      ];
+      _queueSources = [
+        for (final source in resolvedSources) source.playbackSource,
+      ];
+      notifyListeners();
       final sources = [
-        for (final track in tracks)
-          AudioSource.uri(await _sourceUriForTrack(track), tag: track.id),
+        for (final source in resolvedSources)
+          AudioSource.uri(source.uri, tag: source.trackId),
       ];
 
       await audioPlayer.setAudioSources(
@@ -130,6 +146,7 @@ class PlayerController extends ChangeNotifier {
     _errorMessage = null;
     _album = album;
     _queue = List.unmodifiable(tracks);
+    _queueSources = List.filled(tracks.length, PlaybackSource.local);
     notifyListeners();
 
     try {
@@ -213,14 +230,22 @@ class PlayerController extends ChangeNotifier {
     return profile;
   }
 
-  Future<Uri> _sourceUriForTrack(Track track) async {
+  Future<_ResolvedTrackSource> _sourceForTrack(Track track) async {
     final localPath = await _downloadRepository.localFileForTrack(track.id);
     if (localPath != null) {
-      return Uri.file(localPath);
+      return _ResolvedTrackSource(
+        trackId: track.id,
+        uri: Uri.file(localPath),
+        playbackSource: PlaybackSource.local,
+      );
     }
 
     final profile = await _loadProfile();
-    return _client.streamUri(profile, track.id);
+    return _ResolvedTrackSource(
+      trackId: track.id,
+      uri: _client.streamUri(profile, track.id),
+      playbackSource: PlaybackSource.stream,
+    );
   }
 
   Future<Uri> _localDownloadUri(DownloadedTrack download) async {
@@ -246,4 +271,25 @@ class PlayerController extends ChangeNotifier {
     await audioPlayer.dispose();
     super.dispose();
   }
+}
+
+enum PlaybackSource {
+  local(label: 'Local'),
+  stream(label: 'Streaming');
+
+  const PlaybackSource({required this.label});
+
+  final String label;
+}
+
+class _ResolvedTrackSource {
+  const _ResolvedTrackSource({
+    required this.trackId,
+    required this.uri,
+    required this.playbackSource,
+  });
+
+  final String trackId;
+  final Uri uri;
+  final PlaybackSource playbackSource;
 }

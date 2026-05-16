@@ -172,6 +172,7 @@ class DownloadedTrack {
     int? receivedBytes,
     int? totalBytes,
     String? localCoverPath,
+    bool clearLocalCoverPath = false,
     String? errorMessage,
   }) {
     return DownloadedTrack(
@@ -186,7 +187,9 @@ class DownloadedTrack {
       albumId: albumId,
       albumName: albumName,
       coverArtUri: coverArtUri,
-      localCoverPath: localCoverPath ?? this.localCoverPath,
+      localCoverPath: clearLocalCoverPath
+          ? null
+          : localCoverPath ?? this.localCoverPath,
       suffix: suffix,
       bytes: bytes ?? this.bytes,
       receivedBytes: receivedBytes ?? this.receivedBytes,
