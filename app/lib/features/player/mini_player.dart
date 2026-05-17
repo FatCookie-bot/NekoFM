@@ -73,7 +73,8 @@ class _MiniPlayerSurface extends StatelessWidget {
                 child: Row(
                   children: [
                     AlbumArt(
-                      imageUri: controller.album?.coverArtUri,
+                      imageUri:
+                          track?.coverArtUri ?? controller.album?.coverArtUri,
                       size: 44,
                       semanticLabel:
                           '${controller.album?.name ?? 'Album'} cover art',

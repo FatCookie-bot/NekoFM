@@ -5,6 +5,7 @@ import '../liked/liked_page.dart';
 import '../library/library_page.dart';
 import '../player/mini_player.dart';
 import '../player/player_page.dart';
+import '../playlists/playlists_page.dart';
 import '../settings/settings_page.dart';
 
 class AppShell extends StatefulWidget {
@@ -17,11 +18,13 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
   int _libraryResetKey = 0;
+  int _playlistsResetKey = 0;
 
   static const _destinations = <_ShellDestination>[
     _ShellDestination(label: 'Library', icon: Icons.album_outlined),
     _ShellDestination(label: 'Player', icon: Icons.play_circle_outline),
     _ShellDestination(label: 'Liked', icon: Icons.favorite_border),
+    _ShellDestination(label: 'Playlists', icon: Icons.queue_music_outlined),
     _ShellDestination(label: 'Downloads', icon: Icons.download_outlined),
     _ShellDestination(label: 'Settings', icon: Icons.settings_outlined),
   ];
@@ -90,6 +93,9 @@ class _AppShellState extends State<AppShell> {
       if (index == 0 && _selectedIndex == 0) {
         _libraryResetKey += 1;
       }
+      if (index == 3 && _selectedIndex == 3) {
+        _playlistsResetKey += 1;
+      }
       _selectedIndex = index;
     });
   }
@@ -99,8 +105,9 @@ class _AppShellState extends State<AppShell> {
       0 => LibraryPage(key: ValueKey(_libraryResetKey)),
       1 => const PlayerPage(),
       2 => const LikedPage(),
-      3 => const DownloadsPage(),
-      4 => const SettingsPage(),
+      3 => PlaylistsPage(key: ValueKey(_playlistsResetKey)),
+      4 => const DownloadsPage(),
+      5 => const SettingsPage(),
       _ => const LibraryPage(),
     };
   }

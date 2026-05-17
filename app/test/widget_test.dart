@@ -21,6 +21,7 @@ void main() {
 
     expect(find.text('Library'), findsWidgets);
     expect(find.text('Player'), findsOneWidget);
+    expect(find.text('Playlists'), findsOneWidget);
     expect(find.text('Downloads'), findsOneWidget);
     expect(find.text('Settings'), findsOneWidget);
   });

@@ -46,7 +46,8 @@ class _PlayerPageState extends ConsumerState<PlayerPage> {
                   track: track,
                   albumName: controller.album?.name ?? 'Unknown album',
                   artistName: controller.album?.artist,
-                  coverArtUri: controller.album?.coverArtUri,
+                  coverArtUri:
+                      track?.coverArtUri ?? controller.album?.coverArtUri,
                   source: controller.sourceAt(indexSnapshot.data),
                   isLiked: track == null ? false : liked.isLiked(track.id),
                   onToggleLiked: track == null

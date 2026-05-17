@@ -126,3 +126,19 @@ Current export behavior:
 Liked songs are stored inside SQLite as app metadata. M3U is intentionally not used for the in-app liked playlist.
 
 M3U should be added later as an export format for SD card and car playback. Exported M3U files should use paths relative to the exported music folder, not absolute macOS paths.
+
+## Custom Playlists
+
+Custom playlists are stored in SQLite as app metadata:
+
+- `playlists` stores id, name, created time, and updated time.
+- `playlist_tracks` stores copied track metadata and playlist position.
+- Library track rows can add a track to a playlist.
+- Adding a track opens a multi-select playlist picker with a confirm button.
+- Playlists that already contain the chosen track show an `Already added` note in the picker.
+- If a selected playlist already contains that track, NekoFM asks before adding another copy.
+- The duplicate prompt can cancel, skip existing playlists, or add another copy anyway.
+- Playlists can intentionally contain duplicate copies of the same song.
+- The Playlists tab can create playlists, open them, play them, remove tracks, and delete playlists.
+- The Playlists tab can like/unlike tracks inside a playlist.
+- Playlist playback uses the same player path as albums, so downloaded tracks are still preferred when available.

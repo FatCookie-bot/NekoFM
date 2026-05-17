@@ -13,6 +13,8 @@ import '../../core/library/music_library_repository.dart';
 import '../../core/library/track.dart';
 import '../../core/likes/liked_controller.dart';
 import '../../core/player/player_controller.dart';
+import '../../core/playlists/playlist.dart';
+import '../../core/playlists/playlist_controller.dart';
 import '../player/album_art.dart';
 
 class LibraryPage extends ConsumerStatefulWidget {
@@ -42,6 +44,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
     _loadAlbums();
     ref.read(downloadControllerProvider).load();
     ref.read(likedControllerProvider).load();
+    ref.read(playlistControllerProvider).load();
   }
 
   @override
@@ -55,10 +58,11 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
   Widget build(BuildContext context) {
     final downloads = ref.read(downloadControllerProvider);
     final liked = ref.read(likedControllerProvider);
+    final playlists = ref.read(playlistControllerProvider);
     final player = ref.read(playerControllerProvider);
     if (_selectedAlbum != null) {
       return ListenableBuilder(
-        listenable: Listenable.merge([downloads, liked, player]),
+        listenable: Listenable.merge([downloads, liked, playlists, player]),
         builder: (context, _) {
           return _AlbumDetailView(
             album: _selectedAlbum!,
@@ -72,6 +76,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
             onDownloadTrack: downloads.downloadTrack,
             onDeleteTrack: _deleteTrackDownload,
             onToggleLiked: liked.toggleTrack,
+            onAddToPlaylist: _addTrackToPlaylist,
             onDownloadAlbum: downloads.downloadTracks,
             onDeleteAlbum: _deleteAlbumDownloads,
           );
@@ -80,7 +85,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
     }
 
     return ListenableBuilder(
-      listenable: Listenable.merge([downloads, liked, player]),
+      listenable: Listenable.merge([downloads, liked, playlists, player]),
       builder: (context, _) {
         return Column(
           children: [
@@ -110,6 +115,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
                       onDownloadTrack: downloads.downloadTrack,
                       onDeleteTrack: _deleteTrackDownload,
                       onToggleLiked: liked.toggleTrack,
+                      onAddToPlaylist: _addTrackToPlaylist,
                     ),
             ),
           ],
@@ -285,6 +291,74 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
         ]);
       }
     });
+  }
+
+  Future<void> _addTrackToPlaylist(Track track) async {
+    final playlists = ref.read(playlistControllerProvider);
+    await playlists.load();
+    if (!mounted) {
+      return;
+    }
+
+    final selectedPlaylists = await _choosePlaylistsForTrack(
+      context,
+      playlists,
+      track,
+    );
+    if (selectedPlaylists.isEmpty) {
+      return;
+    }
+
+    for (final playlist in selectedPlaylists) {
+      await playlists.loadTracks(playlist.id);
+    }
+    final duplicatePlaylists = [
+      for (final playlist in selectedPlaylists)
+        if (playlists
+            .tracksFor(playlist.id)
+            .any((item) => item.trackId == track.id))
+          playlist,
+    ];
+    var playlistsToAdd = selectedPlaylists;
+    if (duplicatePlaylists.isNotEmpty && mounted) {
+      final duplicateAction = await _confirmDuplicatePlaylistAdd(
+        context,
+        track,
+        duplicatePlaylists,
+      );
+      if (duplicateAction == null ||
+          duplicateAction == _DuplicateAddAction.cancel) {
+        return;
+      }
+      if (duplicateAction == _DuplicateAddAction.skipExisting) {
+        playlistsToAdd = [
+          for (final playlist in selectedPlaylists)
+            if (!duplicatePlaylists.any(
+              (duplicate) => duplicate.id == playlist.id,
+            ))
+              playlist,
+        ];
+      }
+    }
+
+    if (playlistsToAdd.isEmpty) {
+      return;
+    }
+
+    for (final playlist in playlistsToAdd) {
+      await playlists.addTrack(playlist.id, track);
+    }
+    if (!mounted) {
+      return;
+    }
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Added "${track.title}" to ${playlistsToAdd.length} playlist${playlistsToAdd.length == 1 ? '' : 's'}.',
+        ),
+      ),
+    );
   }
 
   Future<void> _deleteAlbumDownloads(List<Track> tracks) async {
@@ -474,6 +548,7 @@ class _SearchResultsView extends StatelessWidget {
     required this.onDownloadTrack,
     required this.onDeleteTrack,
     required this.onToggleLiked,
+    required this.onAddToPlaylist,
   });
 
   final String query;
@@ -486,6 +561,7 @@ class _SearchResultsView extends StatelessWidget {
   final ValueChanged<Track> onDownloadTrack;
   final ValueChanged<Track> onDeleteTrack;
   final ValueChanged<Track> onToggleLiked;
+  final ValueChanged<Track> onAddToPlaylist;
 
   @override
   Widget build(BuildContext context) {
@@ -549,6 +625,7 @@ class _SearchResultsView extends StatelessWidget {
                     onDeleteTrack(track);
                   }),
                   onToggleLiked: () => onToggleLiked(track),
+                  onAddToPlaylist: () => onAddToPlaylist(track),
                 ),
             ],
           ],
@@ -570,6 +647,7 @@ class _AlbumDetailView extends StatelessWidget {
     required this.onPlayTrack,
     required this.onDownloadTrack,
     required this.onToggleLiked,
+    required this.onAddToPlaylist,
     required this.onDownloadAlbum,
     required this.onDeleteTrack,
     required this.onDeleteAlbum,
@@ -584,6 +662,7 @@ class _AlbumDetailView extends StatelessWidget {
   final VoidCallback onRetry;
   final ValueChanged<Track> onDownloadTrack;
   final ValueChanged<Track> onToggleLiked;
+  final ValueChanged<Track> onAddToPlaylist;
   final ValueChanged<List<Track>> onDownloadAlbum;
   final ValueChanged<Track> onDeleteTrack;
   final ValueChanged<List<Track>> onDeleteAlbum;
@@ -703,6 +782,7 @@ class _AlbumDetailView extends StatelessWidget {
                       onDeleteTrack(track);
                     }),
                     onToggleLiked: () => onToggleLiked(track),
+                    onAddToPlaylist: () => onAddToPlaylist(track),
                   );
                 },
               );
@@ -904,6 +984,7 @@ class _TrackTile extends StatelessWidget {
     required this.onDownload,
     required this.onDelete,
     required this.onToggleLiked,
+    required this.onAddToPlaylist,
   });
 
   final Track track;
@@ -914,6 +995,7 @@ class _TrackTile extends StatelessWidget {
   final VoidCallback onDownload;
   final VoidCallback onDelete;
   final VoidCallback onToggleLiked;
+  final VoidCallback onAddToPlaylist;
 
   @override
   Widget build(BuildContext context) {
@@ -942,6 +1024,7 @@ class _TrackTile extends StatelessWidget {
           onDownload: onDownload,
           onDelete: onDelete,
           onToggleLiked: onToggleLiked,
+          onAddToPlaylist: onAddToPlaylist,
         ),
         onTap: onTap,
       ),
@@ -959,6 +1042,7 @@ class _SearchTrackTile extends StatelessWidget {
     required this.onDownload,
     required this.onDelete,
     required this.onToggleLiked,
+    required this.onAddToPlaylist,
   });
 
   final Track track;
@@ -969,6 +1053,7 @@ class _SearchTrackTile extends StatelessWidget {
   final VoidCallback onDownload;
   final VoidCallback onDelete;
   final VoidCallback onToggleLiked;
+  final VoidCallback onAddToPlaylist;
 
   @override
   Widget build(BuildContext context) {
@@ -996,6 +1081,7 @@ class _SearchTrackTile extends StatelessWidget {
           onDownload: onDownload,
           onDelete: onDelete,
           onToggleLiked: onToggleLiked,
+          onAddToPlaylist: onAddToPlaylist,
         ),
         onTap: onTap,
       ),
@@ -1010,6 +1096,7 @@ class _TrackActions extends StatelessWidget {
     required this.onDownload,
     required this.onDelete,
     required this.onToggleLiked,
+    required this.onAddToPlaylist,
   });
 
   final DownloadedTrack? download;
@@ -1017,6 +1104,7 @@ class _TrackActions extends StatelessWidget {
   final VoidCallback onDownload;
   final VoidCallback onDelete;
   final VoidCallback onToggleLiked;
+  final VoidCallback onAddToPlaylist;
 
   @override
   Widget build(BuildContext context) {
@@ -1048,6 +1136,11 @@ class _TrackActions extends StatelessWidget {
           tooltip: isLiked ? 'Remove from liked' : 'Add to liked',
           onPressed: onToggleLiked,
           icon: Icon(isLiked ? Icons.favorite : Icons.favorite_border),
+        ),
+        IconButton(
+          tooltip: 'Add to playlist',
+          onPressed: onAddToPlaylist,
+          icon: const Icon(Icons.playlist_add),
         ),
         IconButton(
           tooltip: isComplete
@@ -1114,6 +1207,180 @@ Future<void> _confirmDeleteTrack(
 
   if (confirmed == true) {
     onConfirm();
+  }
+}
+
+Future<List<Playlist>> _choosePlaylistsForTrack(
+  BuildContext context,
+  PlaylistController playlists,
+  Track track,
+) async {
+  for (final playlist in playlists.playlists) {
+    await playlists.loadTracks(playlist.id);
+  }
+  final duplicatePlaylistIds = {
+    for (final playlist in playlists.playlists)
+      if (playlists
+          .tracksFor(playlist.id)
+          .any((item) => item.trackId == track.id))
+        playlist.id,
+  };
+  if (!context.mounted) {
+    return const [];
+  }
+  final selectedIds = <String>{};
+  final result = await showDialog<List<Playlist>>(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            title: const Text('Add to playlists'),
+            content: SizedBox(
+              width: 380,
+              child: playlists.playlists.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 12),
+                      child: Text('Create a playlist, then choose it here.'),
+                    )
+                  : ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (final playlist in playlists.playlists)
+                          CheckboxListTile(
+                            value: selectedIds.contains(playlist.id),
+                            onChanged: (value) {
+                              setDialogState(() {
+                                if (value == true) {
+                                  selectedIds.add(playlist.id);
+                                } else {
+                                  selectedIds.remove(playlist.id);
+                                }
+                              });
+                            },
+                            title: Text(playlist.name),
+                            subtitle: Text(
+                              duplicatePlaylistIds.contains(playlist.id)
+                                  ? '${playlist.trackCount} tracks • Already added'
+                                  : '${playlist.trackCount} tracks',
+                            ),
+                            secondary: const Icon(Icons.queue_music_outlined),
+                          ),
+                      ],
+                    ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Cancel'),
+              ),
+              TextButton.icon(
+                onPressed: () async {
+                  final name = await _promptForPlaylistName(context);
+                  if (name == null || name.trim().isEmpty) {
+                    return;
+                  }
+                  final playlist = await playlists.createPlaylist(name);
+                  await playlists.load();
+                  await playlists.loadTracks(playlist.id);
+                  setDialogState(() {
+                    selectedIds.add(playlist.id);
+                  });
+                },
+                icon: const Icon(Icons.add),
+                label: const Text('New'),
+              ),
+              FilledButton(
+                onPressed: selectedIds.isEmpty
+                    ? null
+                    : () => Navigator.of(context).pop([
+                        for (final playlist in playlists.playlists)
+                          if (selectedIds.contains(playlist.id)) playlist,
+                      ]),
+                child: const Text('Add'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+  return result ?? const [];
+}
+
+Future<_DuplicateAddAction?> _confirmDuplicatePlaylistAdd(
+  BuildContext context,
+  Track track,
+  List<Playlist> duplicatePlaylists,
+) {
+  final playlistNames = duplicatePlaylists
+      .map((playlist) => playlist.name)
+      .join(', ');
+  return showDialog<_DuplicateAddAction>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        title: const Text('Song already exists'),
+        content: Text(
+          '"${track.title}" is already in $playlistNames. Add another copy anyway?',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.of(context).pop(_DuplicateAddAction.cancel),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () =>
+                Navigator.of(context).pop(_DuplicateAddAction.skipExisting),
+            child: const Text('Skip existing'),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.of(context).pop(_DuplicateAddAction.addAnyway),
+            child: const Text('Add anyway'),
+          ),
+        ],
+      );
+    },
+  );
+}
+
+enum _DuplicateAddAction { cancel, skipExisting, addAnyway }
+
+Future<String?> _promptForPlaylistName(BuildContext context) async {
+  final controller = TextEditingController();
+  try {
+    return showDialog<String>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('New playlist'),
+          content: TextField(
+            controller: controller,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Playlist name',
+              border: OutlineInputBorder(),
+            ),
+            textInputAction: TextInputAction.done,
+            onSubmitted: (value) => Navigator.of(context).pop(value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(controller.text),
+              child: const Text('Create'),
+            ),
+          ],
+        );
+      },
+    );
+  } finally {
+    controller.dispose();
   }
 }
 

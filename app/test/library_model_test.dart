@@ -12,6 +12,7 @@ import 'package:app/core/library/library_search_result.dart';
 import 'package:app/core/library/track.dart';
 import 'package:app/core/likes/liked_repository.dart';
 import 'package:app/core/player/playback_preferences.dart';
+import 'package:app/core/playlists/playlist_repository.dart';
 import 'package:app/core/server/music_server_client.dart';
 import 'package:app/core/server/secure_server_profile_store.dart';
 import 'package:app/features/player/playback_formatting.dart';
@@ -873,7 +874,7 @@ void main() {
     addTearDown(database.close);
     final repository = LikedRepository(database: database);
 
-    const track = Track(
+    final track = Track(
       id: 'track-1',
       title: 'Sonne',
       artist: 'Rammstein',
@@ -891,6 +892,46 @@ void main() {
     await repository.unlikeTrack(track.id);
     expect(await repository.isLiked(track.id), isFalse);
     expect(await repository.loadTracks(), isEmpty);
+  });
+
+  test('persists custom playlists and tracks in sqlite', () async {
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
+    final repository = PlaylistRepository(database: database);
+
+    final track = Track(
+      id: 'track-1',
+      title: 'Sonne',
+      artist: 'Rammstein',
+      trackNumber: 3,
+      durationSeconds: 272,
+      albumId: 'album-1',
+      albumName: 'Mutter',
+      coverArtUri: Uri.parse('https://example.test/cover.jpg'),
+      suffix: 'flac',
+    );
+
+    final playlist = await repository.createPlaylist('Driving');
+    await repository.addTrack(playlist.id, track);
+    await repository.addTrack(playlist.id, track);
+
+    final playlists = await repository.loadPlaylists();
+    final tracks = await repository.loadTracks(playlist.id);
+
+    expect(playlists.single.name, 'Driving');
+    expect(playlists.single.trackCount, 2);
+    expect(tracks, hasLength(2));
+    expect(tracks.first.toTrack().title, 'Sonne');
+    expect(tracks.first.position, 0);
+    expect(tracks.last.position, 1);
+    expect(tracks.first.entryId, isNot(tracks.last.entryId));
+    expect(tracks.first.coverArtUri, 'https://example.test/cover.jpg');
+
+    await repository.removeEntry(playlist.id, tracks.first.entryId);
+    expect(await repository.loadTracks(playlist.id), hasLength(1));
+
+    await repository.deletePlaylist(playlist.id);
+    expect(await repository.loadPlaylists(), isEmpty);
   });
 
   test('decides when back restarts the current track', () {
