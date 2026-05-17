@@ -110,12 +110,20 @@ App-managed downloads are for reliable offline playback inside NekoFM. Exports a
 
 Current export behavior:
 
-- Downloads has an `Export all` action for complete downloads.
-- Exports copy files into `Artist/Album/` folders inside the selected export folder.
+- Downloads has an export builder instead of a blind export-all flow.
+- The export builder shows albums, custom playlists, and Liked.
+- Checking a row selects the whole album/playlist/Liked list.
+- Clicking a row opens it so individual songs can be selected, with a back button to return to the export menu.
+- Offline unavailable songs are dimmed and cannot be selected.
+- Online unavailable songs can be selected and are downloaded directly into the export folder without being added to the app-managed download library.
+- Exports copy files into `Music/Artist/Album/` folders inside the selected export folder.
+- Playlist files are written into `Playlists/`.
 - Exports copy one `cover.jpg` per album when a local cover is available.
-- Exports write `NekoFM_All_Downloads.m3u`.
-- Exports also write `Liked.m3u` when liked songs are downloaded locally.
+- Exports write `.m3u` files for selected custom playlists and Liked.
+- Direct album selections copy audio and covers; they do not create album `.m3u` files by default.
 - M3U entries use relative paths so the exported folder can be moved to an SD card or USB drive.
+- M3U entries are written only for songs that were actually copied or downloaded into the export folder.
+- If a playlist intentionally contains the same song multiple times, the exported `.m3u` preserves those repeated playlist entries while exporting the audio file once.
 - If two exported songs would use the same filename, the later file gets its track id appended instead of overwriting the first.
 - Exports write a hidden `.nekofm_export_manifest.json` so future clean exports know which old files NekoFM created.
 - When exporting into a folder with an existing NekoFM export, the app asks whether to update in place or clean previous NekoFM export files first.

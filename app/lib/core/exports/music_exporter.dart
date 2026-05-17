@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../downloads/downloaded_track.dart';
+import '../library/track.dart';
 
 class MusicExporter {
   const MusicExporter();
@@ -153,6 +154,190 @@ class MusicExporter {
     );
   }
 
+  Future<MusicSelectionExportResult> exportSelection({
+    required List<MusicExportTrackRequest> tracks,
+    required Directory targetRoot,
+    List<MusicExportPlaylistRequest> playlists = const [],
+    bool cleanFirst = false,
+    MusicExportRemoteDownloader? downloadRemoteTrack,
+    MusicExportCoverDownloader? downloadRemoteCover,
+  }) async {
+    if (cleanFirst) {
+      await cleanExport(targetRoot);
+    }
+
+    if (!await targetRoot.exists()) {
+      await targetRoot.create(recursive: true);
+    }
+
+    final uniqueTracks = <String, MusicExportTrackRequest>{};
+    for (final request in tracks) {
+      uniqueTracks.putIfAbsent(request.track.id, () => request);
+    }
+    for (final playlist in playlists) {
+      for (final request in playlist.tracks) {
+        uniqueTracks.putIfAbsent(request.track.id, () => request);
+      }
+    }
+
+    final exportedTracksById = <String, _ExportedTrack>{};
+    final copiedCoverSources = <String>{};
+    final exportedRelativePaths = <String>{};
+    final artifactRelativePaths = <String>{};
+    var copiedTrackCount = 0;
+    var downloadedTrackCount = 0;
+    var skippedTrackCount = 0;
+    var copiedCoverCount = 0;
+    var downloadedCoverCount = 0;
+    var collisionCount = 0;
+
+    final sortedTracks = uniqueTracks.values.toList()
+      ..sort((left, right) => _compareTracks(left.track, right.track));
+    for (final request in sortedTracks) {
+      final track = request.track;
+      final albumDirectory = Directory(
+        '${targetRoot.path}/Music/${_safeFilename(track.artist)}/${_safeFilename(track.albumName ?? 'Unknown Album')}',
+      );
+      if (!await albumDirectory.exists()) {
+        await albumDirectory.create(recursive: true);
+      }
+
+      final destinationFile = _uniqueDestinationFileForTrack(
+        albumDirectory: albumDirectory,
+        track: track,
+        root: targetRoot,
+        reservedRelativePaths: exportedRelativePaths,
+      );
+      if (_exportFilenameForTrack(track) !=
+          destinationFile.uri.pathSegments.last) {
+        collisionCount += 1;
+      }
+
+      final localDownload = request.localDownload;
+      var didExportTrack = false;
+      if (localDownload != null &&
+          localDownload.state == DownloadState.complete &&
+          await _isUsableFile(
+            File(localDownload.localPath),
+            expectedBytes: localDownload.bytes,
+          )) {
+        final sourceFile = File(localDownload.localPath);
+        await _copyReplacing(sourceFile, destinationFile);
+        copiedTrackCount += 1;
+        didExportTrack = true;
+      } else if (downloadRemoteTrack != null) {
+        final partialFile = File('${destinationFile.path}.partial');
+        if (await partialFile.exists()) {
+          await partialFile.delete();
+        }
+        if (await destinationFile.exists()) {
+          await destinationFile.delete();
+        }
+        if (await downloadRemoteTrack(request, partialFile)) {
+          if (await _isUsableFile(partialFile)) {
+            await partialFile.rename(destinationFile.path);
+            downloadedTrackCount += 1;
+            didExportTrack = true;
+          } else if (await partialFile.exists()) {
+            await partialFile.delete();
+          }
+        } else if (await partialFile.exists()) {
+          await partialFile.delete();
+        }
+      }
+
+      if (!didExportTrack) {
+        skippedTrackCount += 1;
+        continue;
+      }
+
+      final relativePath = _relativePlaylistPath(targetRoot, destinationFile);
+      exportedRelativePaths.add(relativePath);
+      artifactRelativePaths.add(relativePath);
+      exportedTracksById[track.id] = _ExportedTrack(
+        track: track,
+        relativePath: relativePath,
+      );
+
+      final localCoverPath = localDownload?.localCoverPath;
+      if (localCoverPath != null &&
+          localCoverPath.isNotEmpty &&
+          !copiedCoverSources.contains(localCoverPath)) {
+        final coverFile = File(localCoverPath);
+        if (await _isUsableFile(coverFile)) {
+          final destinationCoverFile = File('${albumDirectory.path}/cover.jpg');
+          await _copyReplacing(coverFile, destinationCoverFile);
+          artifactRelativePaths.add(
+            _relativePlaylistPath(targetRoot, destinationCoverFile),
+          );
+          copiedCoverSources.add(localCoverPath);
+          copiedCoverCount += 1;
+          continue;
+        }
+      }
+
+      if (downloadRemoteCover != null && track.coverArtUri != null) {
+        final destinationCoverFile = File('${albumDirectory.path}/cover.jpg');
+        if (!await _isUsableFile(destinationCoverFile) &&
+            await downloadRemoteCover(request, destinationCoverFile)) {
+          artifactRelativePaths.add(
+            _relativePlaylistPath(targetRoot, destinationCoverFile),
+          );
+          downloadedCoverCount += 1;
+        }
+      }
+    }
+
+    var playlistCount = 0;
+    var playlistEntryCount = 0;
+    var skippedPlaylistEntryCount = 0;
+    for (final playlist in playlists) {
+      final exportedPlaylistTracks = <_ExportedTrack>[];
+      for (final request in playlist.tracks) {
+        final exportedTrack = exportedTracksById[request.track.id];
+        if (exportedTrack == null) {
+          skippedPlaylistEntryCount += 1;
+          continue;
+        }
+        exportedPlaylistTracks.add(exportedTrack);
+      }
+
+      if (exportedPlaylistTracks.isEmpty) {
+        continue;
+      }
+
+      final playlistDirectory = Directory('${targetRoot.path}/Playlists');
+      if (!await playlistDirectory.exists()) {
+        await playlistDirectory.create(recursive: true);
+      }
+      final playlistFile = File(
+        '${playlistDirectory.path}/${_safeFilename(playlist.name)}.m3u',
+      );
+      await playlistFile.writeAsString(_buildM3u(exportedPlaylistTracks));
+      artifactRelativePaths.add(
+        _relativePlaylistPath(targetRoot, playlistFile),
+      );
+      playlistCount += 1;
+      playlistEntryCount += exportedPlaylistTracks.length;
+    }
+
+    await _writeManifest(targetRoot, artifactRelativePaths);
+
+    return MusicSelectionExportResult(
+      exportedTrackCount: copiedTrackCount + downloadedTrackCount,
+      copiedTrackCount: copiedTrackCount,
+      downloadedTrackCount: downloadedTrackCount,
+      skippedTrackCount: skippedTrackCount,
+      copiedCoverCount: copiedCoverCount,
+      downloadedCoverCount: downloadedCoverCount,
+      collisionCount: collisionCount,
+      playlistCount: playlistCount,
+      playlistEntryCount: playlistEntryCount,
+      skippedPlaylistEntryCount: skippedPlaylistEntryCount,
+      relativePaths: List.unmodifiable(artifactRelativePaths),
+    );
+  }
+
   Future<bool> hasExistingExport(Directory targetRoot) async {
     return await File('${targetRoot.path}/$manifestFilename').exists() ||
         await File(
@@ -182,6 +367,10 @@ class MusicExporter {
   }
 
   static int _compareDownloads(DownloadedTrack left, DownloadedTrack right) {
+    return _compareTracks(left.toTrack(), right.toTrack());
+  }
+
+  static int _compareTracks(Track left, Track right) {
     final artistCompare = left.artist.compareTo(right.artist);
     if (artistCompare != 0) {
       return artistCompare;
@@ -205,9 +394,9 @@ class MusicExporter {
   static String _buildM3u(List<_ExportedTrack> tracks) {
     final lines = <String>['#EXTM3U'];
     for (final track in tracks) {
-      final download = track.download;
+      final source = track.resolvedTrack;
       lines.add(
-        '#EXTINF:${download.durationSeconds},${download.artist} - ${download.title}',
+        '#EXTINF:${source.durationSeconds},${source.artist} - ${source.title}',
       );
       lines.add(track.relativePath);
     }
@@ -216,15 +405,19 @@ class MusicExporter {
   }
 
   static String _exportFilename(DownloadedTrack download) {
-    final filename = _baseFilename(download);
+    return _exportFilenameForTrack(download.toTrack());
+  }
+
+  static String _exportFilenameForTrack(Track track) {
+    final filename = _baseFilenameForTrack(track);
     return _safeFilename(filename);
   }
 
-  static String _baseFilename(DownloadedTrack download) {
-    final extension = _cleanExtension(download.suffix);
-    final title = _safeFilename(download.title);
-    final number = download.trackNumber > 0
-        ? '${download.trackNumber.toString().padLeft(2, '0')} - '
+  static String _baseFilenameForTrack(Track track) {
+    final extension = _cleanExtension(track.suffix);
+    final title = _safeFilename(track.title);
+    final number = track.trackNumber > 0
+        ? '${track.trackNumber.toString().padLeft(2, '0')} - '
         : '';
     final filename = extension == null
         ? '$number$title'
@@ -251,6 +444,52 @@ class MusicExporter {
         ? '${download.trackNumber.toString().padLeft(2, '0')} - '
         : '';
     final trackId = _safeFilename(download.trackId);
+    final fallbackName = extension == null
+        ? '$number$title - $trackId'
+        : '$number$title - $trackId.$extension';
+    final fallbackFile = File(
+      '${albumDirectory.path}/${_safeFilename(fallbackName)}',
+    );
+    final fallbackRelativePath = _relativePlaylistPath(root, fallbackFile);
+    if (!reservedRelativePaths.contains(fallbackRelativePath)) {
+      return fallbackFile;
+    }
+
+    var suffix = 2;
+    while (true) {
+      final numberedName = extension == null
+          ? '$number$title - $trackId - $suffix'
+          : '$number$title - $trackId - $suffix.$extension';
+      final numberedFile = File(
+        '${albumDirectory.path}/${_safeFilename(numberedName)}',
+      );
+      final numberedRelativePath = _relativePlaylistPath(root, numberedFile);
+      if (!reservedRelativePaths.contains(numberedRelativePath)) {
+        return numberedFile;
+      }
+      suffix += 1;
+    }
+  }
+
+  static File _uniqueDestinationFileForTrack({
+    required Directory albumDirectory,
+    required Track track,
+    required Directory root,
+    required Set<String> reservedRelativePaths,
+  }) {
+    final preferredFilename = _exportFilenameForTrack(track);
+    final preferredFile = File('${albumDirectory.path}/$preferredFilename');
+    final preferredRelativePath = _relativePlaylistPath(root, preferredFile);
+    if (!reservedRelativePaths.contains(preferredRelativePath)) {
+      return preferredFile;
+    }
+
+    final extension = _cleanExtension(track.suffix);
+    final title = _safeFilename(track.title);
+    final number = track.trackNumber > 0
+        ? '${track.trackNumber.toString().padLeft(2, '0')} - '
+        : '';
+    final trackId = _safeFilename(track.id);
     final fallbackName = extension == null
         ? '$number$title - $trackId'
         : '$number$title - $trackId.$extension';
@@ -441,9 +680,61 @@ class MusicExportCleanResult {
   final int deletedFileCount;
 }
 
-class _ExportedTrack {
-  const _ExportedTrack({required this.download, required this.relativePath});
+typedef MusicExportRemoteDownloader =
+    Future<bool> Function(MusicExportTrackRequest request, File destination);
 
-  final DownloadedTrack download;
+typedef MusicExportCoverDownloader =
+    Future<bool> Function(MusicExportTrackRequest request, File destination);
+
+class MusicExportTrackRequest {
+  const MusicExportTrackRequest({required this.track, this.localDownload});
+
+  final Track track;
+  final DownloadedTrack? localDownload;
+}
+
+class MusicExportPlaylistRequest {
+  const MusicExportPlaylistRequest({required this.name, required this.tracks});
+
+  final String name;
+  final List<MusicExportTrackRequest> tracks;
+}
+
+class MusicSelectionExportResult {
+  const MusicSelectionExportResult({
+    required this.exportedTrackCount,
+    required this.copiedTrackCount,
+    required this.downloadedTrackCount,
+    required this.skippedTrackCount,
+    required this.copiedCoverCount,
+    required this.downloadedCoverCount,
+    required this.collisionCount,
+    required this.playlistCount,
+    required this.playlistEntryCount,
+    required this.skippedPlaylistEntryCount,
+    required this.relativePaths,
+  });
+
+  final int exportedTrackCount;
+  final int copiedTrackCount;
+  final int downloadedTrackCount;
+  final int skippedTrackCount;
+  final int copiedCoverCount;
+  final int downloadedCoverCount;
+  final int collisionCount;
+  final int playlistCount;
+  final int playlistEntryCount;
+  final int skippedPlaylistEntryCount;
+  final List<String> relativePaths;
+}
+
+class _ExportedTrack {
+  const _ExportedTrack({this.download, this.track, required this.relativePath})
+    : assert(download != null || track != null);
+
+  final DownloadedTrack? download;
+  final Track? track;
   final String relativePath;
+
+  Track get resolvedTrack => track ?? download!.toTrack();
 }

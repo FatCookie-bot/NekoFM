@@ -568,6 +568,129 @@ void main() {
   });
 
   test(
+    'selection export copies local tracks and downloads missing playlist tracks',
+    () async {
+      final tempRoot = await Directory.systemTemp.createTemp(
+        'nekofm_selection_export_',
+      );
+      addTearDown(() async {
+        if (await tempRoot.exists()) {
+          await tempRoot.delete(recursive: true);
+        }
+      });
+
+      final sourceDirectory = Directory('${tempRoot.path}/source');
+      await sourceDirectory.create(recursive: true);
+      final localAudio = File('${sourceDirectory.path}/local.flac');
+      final localCover = File('${sourceDirectory.path}/cover.jpg');
+      await localAudio.writeAsBytes([1, 2, 3]);
+      await localCover.writeAsBytes([7, 8, 9]);
+
+      final localTrack = Track(
+        id: 'local-track',
+        title: 'Local Song',
+        artist: 'Artist',
+        trackNumber: 1,
+        durationSeconds: 11,
+        albumName: 'Album',
+        suffix: 'flac',
+      );
+      final remoteTrack = Track(
+        id: 'remote-track',
+        title: 'Remote Song',
+        artist: 'Artist',
+        trackNumber: 2,
+        durationSeconds: 22,
+        albumName: 'Album',
+        suffix: 'flac',
+        coverArtUri: Uri.parse('http://example.test/cover.jpg'),
+      );
+      final missingTrack = Track(
+        id: 'missing-track',
+        title: 'Missing Song',
+        artist: 'Artist',
+        trackNumber: 3,
+        durationSeconds: 33,
+        albumName: 'Album',
+        suffix: 'flac',
+      );
+
+      final targetRoot = Directory('${tempRoot.path}/export');
+      final result = await const MusicExporter().exportSelection(
+        targetRoot: targetRoot,
+        tracks: [
+          MusicExportTrackRequest(
+            track: localTrack,
+            localDownload: DownloadedTrack(
+              trackId: 'local-track',
+              title: 'Local Song',
+              artist: 'Artist',
+              trackNumber: 1,
+              durationSeconds: 11,
+              localPath: localAudio.path,
+              state: DownloadState.complete,
+              updatedAt: DateTime(2026, 5, 17),
+              albumName: 'Album',
+              suffix: 'flac',
+              bytes: 3,
+              localCoverPath: localCover.path,
+            ),
+          ),
+        ],
+        playlists: [
+          MusicExportPlaylistRequest(
+            name: 'Road',
+            tracks: [
+              MusicExportTrackRequest(track: localTrack),
+              MusicExportTrackRequest(track: remoteTrack),
+              MusicExportTrackRequest(track: remoteTrack),
+              MusicExportTrackRequest(track: missingTrack),
+            ],
+          ),
+        ],
+        downloadRemoteTrack: (request, destination) async {
+          if (request.track.id != 'remote-track') {
+            return false;
+          }
+          await destination.writeAsBytes([4, 5, 6]);
+          return true;
+        },
+        downloadRemoteCover: (request, destination) async {
+          await destination.writeAsBytes([10, 11]);
+          return true;
+        },
+      );
+
+      final localExport = File(
+        '${targetRoot.path}/Music/Artist/Album/01_-_Local_Song.flac',
+      );
+      final remoteExport = File(
+        '${targetRoot.path}/Music/Artist/Album/02_-_Remote_Song.flac',
+      );
+      final playlistText = await File(
+        '${targetRoot.path}/Playlists/Road.m3u',
+      ).readAsString();
+
+      expect(result.exportedTrackCount, 2);
+      expect(result.copiedTrackCount, 1);
+      expect(result.downloadedTrackCount, 1);
+      expect(result.skippedTrackCount, 1);
+      expect(result.playlistCount, 1);
+      expect(result.playlistEntryCount, 3);
+      expect(result.skippedPlaylistEntryCount, 1);
+      expect(await localExport.readAsBytes(), [1, 2, 3]);
+      expect(await remoteExport.readAsBytes(), [4, 5, 6]);
+      expect(playlistText, contains('Music/Artist/Album/01_-_Local_Song.flac'));
+      expect(
+        playlistText,
+        contains('Music/Artist/Album/02_-_Remote_Song.flac'),
+      );
+      expect('Remote_Song'.allMatches(playlistText).length, 2);
+      expect(playlistText, isNot(contains('Missing_Song')));
+    },
+  );
+
+  test(
     'export avoids overwriting tracks with matching visible metadata',
     () async {
       final tempRoot = await Directory.systemTemp.createTemp(

@@ -1,15 +1,22 @@
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/library/album.dart';
+import '../../core/library/music_library_repository.dart';
+import '../../core/library/track.dart';
 import '../../core/downloads/download_controller.dart';
 import '../../core/downloads/download_repository.dart';
 import '../../core/downloads/downloaded_track.dart';
 import '../../core/exports/music_exporter.dart';
 import '../../core/likes/liked_controller.dart';
 import '../../core/player/player_controller.dart';
+import '../../core/playlists/playlist_controller.dart';
+import '../../core/server/music_server_client.dart';
+import '../../core/server/secure_server_profile_store.dart';
 import '../player/playback_formatting.dart';
 
 class DownloadsPage extends ConsumerStatefulWidget {
@@ -21,6 +28,11 @@ class DownloadsPage extends ConsumerStatefulWidget {
 
 class _DownloadsPageState extends ConsumerState<DownloadsPage> {
   final _exporter = const MusicExporter();
+  final _downloadRepository = DownloadRepository();
+  final _libraryRepository = MusicLibraryRepository();
+  final _profileStore = const SecureServerProfileStore();
+  final _serverClient = MusicServerClient();
+  final _dio = Dio();
   bool _isExporting = false;
   String? _exportMessage;
 
@@ -29,17 +41,25 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
     super.initState();
     ref.read(downloadControllerProvider).load();
     ref.read(likedControllerProvider).load();
+    ref.read(playlistControllerProvider).load();
+  }
+
+  @override
+  void dispose() {
+    _dio.close(force: true);
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final controller = ref.read(downloadControllerProvider);
     final liked = ref.read(likedControllerProvider);
+    final playlists = ref.read(playlistControllerProvider);
     final player = ref.read(playerControllerProvider);
     return ListenableBuilder(
-      listenable: Listenable.merge([controller, liked, player]),
+      listenable: Listenable.merge([controller, liked, playlists, player]),
       builder: (context, _) {
-        if (!controller.isLoaded || !liked.isLoaded) {
+        if (!controller.isLoaded || !liked.isLoaded || !playlists.isLoaded) {
           return const Center(child: CircularProgressIndicator());
         }
 
@@ -49,9 +69,17 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
             title: 'No downloads yet',
             message:
                 _repairMessage(controller.lastRepairResult) ??
-                'Download tracks from Library to play them offline.',
-            actionLabel: 'Recheck',
-            onAction: controller.repair,
+                'Download tracks from Library to play them offline, or export from your server directly.',
+            actionLabel: _isExporting ? 'Exporting...' : 'Export',
+            actionIcon: _isExporting
+                ? Icons.hourglass_empty_outlined
+                : Icons.ios_share_outlined,
+            onAction: _isExporting
+                ? null
+                : () => _exportDownloads(controller.tracks),
+            secondaryActionLabel: 'Recheck',
+            secondaryActionIcon: Icons.refresh_outlined,
+            onSecondaryAction: controller.repair,
           );
         }
 
@@ -63,12 +91,8 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
               onRepair: controller.repair,
               failedCount: controller.failedCount,
               onRetryFailed: controller.retryFailedDownloads,
-              completeCount: _completeDownloads(controller.tracks).length,
               isExporting: _isExporting,
-              onExport: () => _exportDownloads(
-                controller.tracks,
-                liked.tracks.map((track) => track.trackId).toList(),
-              ),
+              onExport: () => _exportDownloads(controller.tracks),
             ),
             if (_exportMessage != null) ...[
               const SizedBox(height: 8),
@@ -108,15 +132,24 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
     );
   }
 
-  Future<void> _exportDownloads(
-    List<DownloadedTrack> downloads,
-    List<String> likedTrackIds,
-  ) async {
-    final completeDownloads = _completeDownloads(downloads);
-    if (completeDownloads.isEmpty) {
+  Future<void> _exportDownloads(List<DownloadedTrack> downloads) async {
+    final builderData = await _loadExportBuilderData(downloads);
+    if (!mounted) {
+      return;
+    }
+
+    if (!builderData.hasAnyExportableMusic) {
       setState(() {
-        _exportMessage = 'Download tracks before exporting.';
+        _exportMessage = 'No albums, playlists, or liked songs to export yet.';
       });
+      return;
+    }
+
+    final selection = await showDialog<_ExportSelection>(
+      context: context,
+      builder: (context) => _ExportBuilderDialog(data: builderData),
+    );
+    if (selection == null || selection.isEmpty || !mounted) {
       return;
     }
 
@@ -137,11 +170,49 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
     });
 
     try {
-      final result = await _exporter.exportLibrary(
-        downloads: completeDownloads,
+      final profile = selection.hasMissingRemoteTracks
+          ? await _profileStore.load()
+          : null;
+      final canDownloadRemote = profile != null && profile.password.isNotEmpty;
+      final result = await _exporter.exportSelection(
+        tracks: selection.directTracks,
         targetRoot: targetRoot,
-        likedTrackIds: likedTrackIds,
+        playlists: selection.playlists,
         cleanFirst: exportMode == _ExportMode.clean,
+        downloadRemoteTrack: canDownloadRemote
+            ? (request, destination) async {
+                try {
+                  await _serverClient.downloadTrack(
+                    profile,
+                    request.track.id,
+                    destination.path,
+                  );
+                  return true;
+                } on Object {
+                  return false;
+                }
+              }
+            : null,
+        downloadRemoteCover: canDownloadRemote
+            ? (request, destination) async {
+                final coverUri = request.track.coverArtUri;
+                if (coverUri == null) {
+                  return false;
+                }
+                try {
+                  await _dio.downloadUri(
+                    coverUri,
+                    destination.path,
+                    options: Options(
+                      receiveTimeout: const Duration(seconds: 20),
+                    ),
+                  );
+                  return true;
+                } on Object {
+                  return false;
+                }
+              }
+            : null,
       );
       if (!mounted) {
         return;
@@ -150,7 +221,7 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
       setState(() {
         _isExporting = false;
         _exportMessage =
-            'Exported ${result.allDownloads.exportedTrackCount} tracks, ${result.allDownloads.copiedCoverCount} covers, ${result.allDownloads.skippedTrackCount} skipped, and ${result.allDownloads.collisionCount} filename fixes. ${result.liked == null ? 'No downloaded liked songs for Liked.m3u.' : 'Liked.m3u included.'}';
+            'Exported ${result.exportedTrackCount} tracks (${result.copiedTrackCount} copied, ${result.downloadedTrackCount} downloaded), ${result.playlistCount} playlists, ${result.skippedTrackCount + result.skippedPlaylistEntryCount} skipped, and ${result.collisionCount} filename fixes.';
       });
     } on Object catch (error) {
       if (!mounted) {
@@ -162,6 +233,73 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
         _exportMessage = 'Export failed: $error';
       });
     }
+  }
+
+  Future<_ExportBuilderData> _loadExportBuilderData(
+    List<DownloadedTrack> downloads,
+  ) async {
+    final downloadMap = {
+      for (final download in _completeDownloads(downloads))
+        download.trackId: download,
+    };
+    var isOnline = true;
+    List<Album> albums;
+    try {
+      albums = await _libraryRepository.getAlbums();
+    } on Object {
+      isOnline = false;
+      final downloadedDetails = await _downloadRepository
+          .loadDownloadedAlbumDetails();
+      albums = [for (final detail in downloadedDetails) detail.album];
+    }
+
+    final playlists = ref.read(playlistControllerProvider);
+    for (final playlist in playlists.playlists) {
+      await playlists.loadTracks(playlist.id);
+    }
+
+    return _ExportBuilderData(
+      albums: albums,
+      isOnline: isOnline,
+      downloadsByTrackId: downloadMap,
+      loadAlbumTracks: (album) async {
+        if (isOnline) {
+          try {
+            return (await _libraryRepository.getAlbum(album.id)).tracks;
+          } on Object {
+            return _downloadedTracksForAlbum(album.id, downloadMap);
+          }
+        }
+        return _downloadedTracksForAlbum(album.id, downloadMap);
+      },
+      playlists: [
+        for (final playlist in playlists.playlists)
+          _ExportPlaylistGroup(
+            id: playlist.id,
+            name: playlist.name,
+            tracks: [
+              for (final track in playlists.tracksFor(playlist.id))
+                track.toTrack(),
+            ],
+          ),
+      ],
+      likedTracks: [
+        for (final liked in ref.read(likedControllerProvider).tracks)
+          liked.toTrack(),
+      ],
+    );
+  }
+
+  List<Track> _downloadedTracksForAlbum(
+    String albumId,
+    Map<String, DownloadedTrack> downloadsByTrackId,
+  ) {
+    final tracks = [
+      for (final download in downloadsByTrackId.values)
+        if ((download.albumId ?? download.albumName ?? 'downloads') == albumId)
+          download.toTrack(),
+    ]..sort((left, right) => left.trackNumber.compareTo(right.trackNumber));
+    return tracks;
   }
 
   Future<_ExportMode?> _chooseExportMode(Directory targetRoot) async {
@@ -232,12 +370,408 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
 
 enum _ExportMode { update, clean }
 
+class _ExportBuilderData {
+  const _ExportBuilderData({
+    required this.albums,
+    required this.isOnline,
+    required this.downloadsByTrackId,
+    required this.loadAlbumTracks,
+    required this.playlists,
+    required this.likedTracks,
+  });
+
+  final List<Album> albums;
+  final bool isOnline;
+  final Map<String, DownloadedTrack> downloadsByTrackId;
+  final Future<List<Track>> Function(Album album) loadAlbumTracks;
+  final List<_ExportPlaylistGroup> playlists;
+  final List<Track> likedTracks;
+
+  bool get hasAnyExportableMusic =>
+      albums.isNotEmpty || playlists.isNotEmpty || likedTracks.isNotEmpty;
+
+  MusicExportTrackRequest requestFor(Track track) {
+    return MusicExportTrackRequest(
+      track: track,
+      localDownload: downloadsByTrackId[track.id],
+    );
+  }
+
+  bool isAvailable(Track track) {
+    return isOnline || downloadsByTrackId.containsKey(track.id);
+  }
+
+  bool isDownloaded(Track track) {
+    return downloadsByTrackId.containsKey(track.id);
+  }
+}
+
+class _ExportPlaylistGroup {
+  const _ExportPlaylistGroup({
+    required this.id,
+    required this.name,
+    required this.tracks,
+  });
+
+  final String id;
+  final String name;
+  final List<Track> tracks;
+}
+
+class _ExportSelection {
+  const _ExportSelection({
+    required this.directTracks,
+    required this.playlists,
+    required this.hasMissingRemoteTracks,
+  });
+
+  final List<MusicExportTrackRequest> directTracks;
+  final List<MusicExportPlaylistRequest> playlists;
+  final bool hasMissingRemoteTracks;
+
+  bool get isEmpty => directTracks.isEmpty && playlists.isEmpty;
+}
+
+enum _ExportGroupType { album, liked, playlist }
+
+class _ExportGroupRef {
+  const _ExportGroupRef({
+    required this.id,
+    required this.title,
+    required this.subtitle,
+    required this.type,
+    this.album,
+    this.playlist,
+  });
+
+  final String id;
+  final String title;
+  final String subtitle;
+  final _ExportGroupType type;
+  final Album? album;
+  final _ExportPlaylistGroup? playlist;
+}
+
+class _ExportBuilderDialog extends StatefulWidget {
+  const _ExportBuilderDialog({required this.data});
+
+  final _ExportBuilderData data;
+
+  @override
+  State<_ExportBuilderDialog> createState() => _ExportBuilderDialogState();
+}
+
+class _ExportBuilderDialogState extends State<_ExportBuilderDialog> {
+  final Map<String, List<Track>> _tracksByGroupId = {};
+  final Map<String, Set<String>> _selectedKeysByGroupId = {};
+  final Set<String> _loadingGroupIds = {};
+  _ExportGroupRef? _activeGroup;
+
+  List<_ExportGroupRef> get _groups {
+    return [
+      for (final album in widget.data.albums)
+        _ExportGroupRef(
+          id: 'album:${album.id}',
+          title: album.name,
+          subtitle: '${album.artist} • ${album.songCount} songs',
+          type: _ExportGroupType.album,
+          album: album,
+        ),
+      if (widget.data.likedTracks.isNotEmpty)
+        _ExportGroupRef(
+          id: 'liked',
+          title: 'Liked',
+          subtitle: '${widget.data.likedTracks.length} songs',
+          type: _ExportGroupType.liked,
+        ),
+      for (final playlist in widget.data.playlists)
+        _ExportGroupRef(
+          id: 'playlist:${playlist.id}',
+          title: playlist.name,
+          subtitle: '${playlist.tracks.length} songs',
+          type: _ExportGroupType.playlist,
+          playlist: playlist,
+        ),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final activeGroup = _activeGroup;
+    return AlertDialog(
+      titlePadding: const EdgeInsets.fromLTRB(20, 18, 20, 0),
+      contentPadding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+      actionsPadding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+      title: activeGroup == null
+          ? const Text('Export')
+          : Row(
+              children: [
+                IconButton(
+                  tooltip: 'Back',
+                  onPressed: () => setState(() => _activeGroup = null),
+                  icon: const Icon(Icons.arrow_back),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    activeGroup.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+            ),
+      content: SizedBox(
+        width: 640,
+        height: 520,
+        child: activeGroup == null
+            ? _buildGroupList(context)
+            : _buildTrackList(context, activeGroup),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton.icon(
+          onPressed: _selectedCount == 0
+              ? null
+              : () => Navigator.of(context).pop(_buildSelection()),
+          icon: const Icon(Icons.ios_share_outlined),
+          label: Text('Export $_selectedCount'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildGroupList(BuildContext context) {
+    return ListView.separated(
+      itemCount: _groups.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, index) {
+        final group = _groups[index];
+        final selectedCount = _selectedKeysByGroupId[group.id]?.length ?? 0;
+        final knownTracks = _knownTracksFor(group);
+        final availableCount = knownTracks
+            .where(widget.data.isAvailable)
+            .length;
+        final isLoading = _loadingGroupIds.contains(group.id);
+        final isChecked = availableCount > 0 && selectedCount >= availableCount;
+        return ListTile(
+          contentPadding: EdgeInsets.zero,
+          leading: isLoading
+              ? const SizedBox.square(
+                  dimension: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Checkbox(
+                  value: isChecked,
+                  onChanged: (_) => _toggleWholeGroup(group),
+                ),
+          title: Text(
+            group.title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: Text(
+            selectedCount == 0
+                ? group.subtitle
+                : '$selectedCount selected • ${group.subtitle}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: () => _openGroup(group),
+        );
+      },
+    );
+  }
+
+  Widget _buildTrackList(BuildContext context, _ExportGroupRef group) {
+    final tracks = _knownTracksFor(group);
+    final isLoading = _loadingGroupIds.contains(group.id);
+    if (isLoading && tracks.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (tracks.isEmpty) {
+      return const Center(child: Text('No songs found.'));
+    }
+
+    return ListView.separated(
+      itemCount: tracks.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, index) {
+        final track = tracks[index];
+        final key = _entryKey(group, track, index);
+        final selected =
+            _selectedKeysByGroupId[group.id]?.contains(key) ?? false;
+        final available = widget.data.isAvailable(track);
+        final downloaded = widget.data.isDownloaded(track);
+        return Opacity(
+          opacity: available ? 1 : 0.45,
+          child: CheckboxListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            value: selected,
+            onChanged: available
+                ? (_) => setState(() {
+                    final selectedKeys = _selectedKeysByGroupId.putIfAbsent(
+                      group.id,
+                      () => <String>{},
+                    );
+                    if (!selectedKeys.add(key)) {
+                      selectedKeys.remove(key);
+                    }
+                  })
+                : null,
+            title: Text(
+              track.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(
+              downloaded
+                  ? '${track.artist} • Local'
+                  : widget.data.isOnline
+                  ? '${track.artist} • Will download to export'
+                  : '${track.artist} • Not downloaded',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openGroup(_ExportGroupRef group) async {
+    setState(() => _activeGroup = group);
+    await _ensureGroupTracks(group);
+  }
+
+  Future<void> _toggleWholeGroup(_ExportGroupRef group) async {
+    final tracks = await _ensureGroupTracks(group);
+    if (!mounted) {
+      return;
+    }
+    final availableEntries = <String>{};
+    for (var i = 0; i < tracks.length; i += 1) {
+      final track = tracks[i];
+      if (widget.data.isAvailable(track)) {
+        availableEntries.add(_entryKey(group, track, i));
+      }
+    }
+    final selectedEntries = _selectedKeysByGroupId[group.id] ?? <String>{};
+    setState(() {
+      if (availableEntries.isNotEmpty &&
+          selectedEntries.length >= availableEntries.length) {
+        _selectedKeysByGroupId.remove(group.id);
+      } else {
+        _selectedKeysByGroupId[group.id] = availableEntries;
+      }
+    });
+  }
+
+  Future<List<Track>> _ensureGroupTracks(_ExportGroupRef group) async {
+    final existing = _tracksByGroupId[group.id];
+    if (existing != null) {
+      return existing;
+    }
+    if (_loadingGroupIds.contains(group.id)) {
+      return existing ?? const [];
+    }
+
+    setState(() => _loadingGroupIds.add(group.id));
+    final tracks = switch (group.type) {
+      _ExportGroupType.album => await widget.data.loadAlbumTracks(group.album!),
+      _ExportGroupType.liked => widget.data.likedTracks,
+      _ExportGroupType.playlist => group.playlist!.tracks,
+    };
+    if (!mounted) {
+      return tracks;
+    }
+    setState(() {
+      _tracksByGroupId[group.id] = tracks;
+      _loadingGroupIds.remove(group.id);
+    });
+    return tracks;
+  }
+
+  List<Track> _knownTracksFor(_ExportGroupRef group) {
+    if (_tracksByGroupId[group.id] != null) {
+      return _tracksByGroupId[group.id]!;
+    }
+    return switch (group.type) {
+      _ExportGroupType.album => const [],
+      _ExportGroupType.liked => widget.data.likedTracks,
+      _ExportGroupType.playlist => group.playlist!.tracks,
+    };
+  }
+
+  int get _selectedCount {
+    var count = 0;
+    for (final selected in _selectedKeysByGroupId.values) {
+      count += selected.length;
+    }
+    return count;
+  }
+
+  _ExportSelection _buildSelection() {
+    final directTracksById = <String, MusicExportTrackRequest>{};
+    final playlists = <MusicExportPlaylistRequest>[];
+    var hasMissingRemoteTracks = false;
+
+    for (final group in _groups) {
+      final selectedKeys = _selectedKeysByGroupId[group.id];
+      if (selectedKeys == null || selectedKeys.isEmpty) {
+        continue;
+      }
+      final tracks = _knownTracksFor(group);
+      final selectedRequests = <MusicExportTrackRequest>[];
+      for (var i = 0; i < tracks.length; i += 1) {
+        final track = tracks[i];
+        if (!selectedKeys.contains(_entryKey(group, track, i))) {
+          continue;
+        }
+        final request = widget.data.requestFor(track);
+        if (request.localDownload == null) {
+          hasMissingRemoteTracks = true;
+        }
+        if (group.type == _ExportGroupType.album) {
+          directTracksById.putIfAbsent(track.id, () => request);
+        } else {
+          selectedRequests.add(request);
+        }
+      }
+      if (selectedRequests.isNotEmpty) {
+        playlists.add(
+          MusicExportPlaylistRequest(
+            name: group.title,
+            tracks: selectedRequests,
+          ),
+        );
+      }
+    }
+
+    return _ExportSelection(
+      directTracks: directTracksById.values.toList(),
+      playlists: playlists,
+      hasMissingRemoteTracks: hasMissingRemoteTracks,
+    );
+  }
+
+  String _entryKey(_ExportGroupRef group, Track track, int index) {
+    return group.type == _ExportGroupType.playlist
+        ? '${track.id}:$index'
+        : track.id;
+  }
+}
+
 class _DownloadsToolbar extends StatelessWidget {
   const _DownloadsToolbar({
     required this.onRepair,
     required this.failedCount,
     required this.onRetryFailed,
-    required this.completeCount,
     required this.isExporting,
     required this.onExport,
     this.repairMessage,
@@ -246,7 +780,6 @@ class _DownloadsToolbar extends StatelessWidget {
   final VoidCallback onRepair;
   final int failedCount;
   final VoidCallback onRetryFailed;
-  final int completeCount;
   final bool isExporting;
   final VoidCallback onExport;
   final String? repairMessage;
@@ -288,14 +821,14 @@ class _DownloadsToolbar extends StatelessWidget {
                   label: Text('Retry failed ($failedCount)'),
                 ),
               OutlinedButton.icon(
-                onPressed: completeCount <= 0 || isExporting ? null : onExport,
+                onPressed: isExporting ? null : onExport,
                 icon: isExporting
                     ? const SizedBox.square(
                         dimension: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.ios_share_outlined),
-                label: Text(isExporting ? 'Exporting...' : 'Export all'),
+                label: Text(isExporting ? 'Exporting...' : 'Export'),
               ),
               OutlinedButton.icon(
                 onPressed: onRepair,
@@ -548,14 +1081,22 @@ class _DownloadsMessage extends StatelessWidget {
     required this.title,
     required this.message,
     this.actionLabel,
+    this.actionIcon,
     this.onAction,
+    this.secondaryActionLabel,
+    this.secondaryActionIcon,
+    this.onSecondaryAction,
   });
 
   final IconData icon;
   final String title;
   final String message;
   final String? actionLabel;
+  final IconData? actionIcon;
   final VoidCallback? onAction;
+  final String? secondaryActionLabel;
+  final IconData? secondaryActionIcon;
+  final VoidCallback? onSecondaryAction;
 
   @override
   Widget build(BuildContext context) {
@@ -583,10 +1124,23 @@ class _DownloadsMessage extends StatelessWidget {
             ),
             if (actionLabel != null && onAction != null) ...[
               const SizedBox(height: 16),
-              OutlinedButton.icon(
-                onPressed: onAction,
-                icon: const Icon(Icons.refresh_outlined),
-                label: Text(actionLabel!),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: onAction,
+                    icon: Icon(actionIcon ?? Icons.refresh_outlined),
+                    label: Text(actionLabel!),
+                  ),
+                  if (secondaryActionLabel != null && onSecondaryAction != null)
+                    OutlinedButton.icon(
+                      onPressed: onSecondaryAction,
+                      icon: Icon(secondaryActionIcon ?? Icons.refresh_outlined),
+                      label: Text(secondaryActionLabel!),
+                    ),
+                ],
               ),
             ],
           ],
