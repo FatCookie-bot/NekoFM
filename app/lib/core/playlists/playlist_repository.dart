@@ -52,4 +52,8 @@ class PlaylistRepository {
   Future<void> removeEntry(String playlistId, String entryId) {
     return _database.deletePlaylistTrackEntry(playlistId, entryId);
   }
+
+  Future<void> reorderTracks(String playlistId, List<String> entryIds) {
+    return _database.reorderPlaylistTracks(playlistId, entryIds);
+  }
 }

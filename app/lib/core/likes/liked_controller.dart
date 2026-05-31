@@ -46,4 +46,11 @@ class LikedController extends ChangeNotifier {
     await _repository.unlikeTrack(trackId);
     await load();
   }
+
+  Future<void> reorderTracks(List<LikedTrack> tracks) async {
+    await _repository.reorderTracks([
+      for (final track in tracks) track.trackId,
+    ]);
+    await load();
+  }
 }

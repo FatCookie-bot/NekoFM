@@ -19,6 +19,9 @@ class PlaylistsPage extends ConsumerStatefulWidget {
 
 class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
   Playlist? _selectedPlaylist;
+  bool _isReordering = false;
+  int? _selectedReorderIndex;
+  List<PlaylistTrack> _reorderDraft = const [];
 
   @override
   void initState() {
@@ -41,19 +44,33 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
 
         final selected = _selectedPlaylist;
         if (selected != null) {
+          final tracks = _isReordering
+              ? _reorderDraft
+              : playlists.tracksFor(selected.id);
           return _PlaylistDetailView(
             playlist: selected,
-            tracks: playlists.tracksFor(selected.id),
+            tracks: tracks,
             liked: liked,
             player: player,
+            isReordering: _isReordering,
+            selectedReorderIndex: _selectedReorderIndex,
             onBack: () => setState(() {
               _selectedPlaylist = null;
+              _isReordering = false;
+              _selectedReorderIndex = null;
+              _reorderDraft = const [];
             }),
             onPlay: (index) => _playPlaylist(selected, index),
             onDelete: () => _confirmDeletePlaylist(selected),
             onToggleLiked: (track) => liked.toggleTrack(track.toTrack()),
             onRemoveTrack: (track) =>
                 playlists.removeEntry(selected.id, track.entryId),
+            onStartReorder: () =>
+                _startPlaylistReorder(playlists.tracksFor(selected.id)),
+            onCancelReorder: _cancelPlaylistReorder,
+            onConfirmReorder: () => _confirmPlaylistReorder(selected),
+            onMoveReorder: _movePlaylistDraft,
+            onSelectOrSwapReorder: _selectOrSwapPlaylist,
           );
         }
 
@@ -154,7 +171,9 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
   }
 
   Future<void> _playPlaylist(Playlist playlist, int index) {
-    final tracks = ref.read(playlistControllerProvider).tracksFor(playlist.id);
+    final tracks = _isReordering
+        ? _reorderDraft
+        : ref.read(playlistControllerProvider).tracksFor(playlist.id);
     if (tracks.isEmpty) {
       return Future.value();
     }
@@ -177,6 +196,69 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
           startIndex: index,
         );
   }
+
+  void _startPlaylistReorder(List<PlaylistTrack> tracks) {
+    setState(() {
+      _isReordering = true;
+      _selectedReorderIndex = null;
+      _reorderDraft = List<PlaylistTrack>.of(tracks);
+    });
+  }
+
+  void _cancelPlaylistReorder() {
+    setState(() {
+      _isReordering = false;
+      _selectedReorderIndex = null;
+      _reorderDraft = const [];
+    });
+  }
+
+  Future<void> _confirmPlaylistReorder(Playlist playlist) async {
+    final orderedTracks = List<PlaylistTrack>.of(_reorderDraft);
+    await ref
+        .read(playlistControllerProvider)
+        .reorderTracks(playlist.id, orderedTracks);
+    await ref
+        .read(playerControllerProvider)
+        .reorderCurrentQueue(
+          albumId: playlist.id,
+          tracks: [for (final track in orderedTracks) track.toTrack()],
+        );
+    if (!mounted) {
+      return;
+    }
+    _cancelPlaylistReorder();
+  }
+
+  void _movePlaylistDraft(int oldIndex, int newIndex) {
+    setState(() {
+      if (newIndex > oldIndex) {
+        newIndex -= 1;
+      }
+      final moved = _reorderDraft.removeAt(oldIndex);
+      _reorderDraft.insert(newIndex, moved);
+      _selectedReorderIndex = null;
+    });
+  }
+
+  void _selectOrSwapPlaylist(int index) {
+    final selected = _selectedReorderIndex;
+    if (selected == null || selected == index) {
+      setState(() {
+        _selectedReorderIndex = selected == index ? null : index;
+      });
+      return;
+    }
+
+    setState(() {
+      final next = List<PlaylistTrack>.of(_reorderDraft);
+      final first = next[selected];
+      next[selected] = next[index];
+      next[index] = first;
+      _reorderDraft = next;
+      _selectedReorderIndex = null;
+    });
+  }
 }
 
 class _PlaylistDetailView extends StatelessWidget {
@@ -185,22 +267,36 @@ class _PlaylistDetailView extends StatelessWidget {
     required this.tracks,
     required this.liked,
     required this.player,
+    required this.isReordering,
+    required this.selectedReorderIndex,
     required this.onBack,
     required this.onPlay,
     required this.onDelete,
     required this.onToggleLiked,
     required this.onRemoveTrack,
+    required this.onStartReorder,
+    required this.onCancelReorder,
+    required this.onConfirmReorder,
+    required this.onMoveReorder,
+    required this.onSelectOrSwapReorder,
   });
 
   final Playlist playlist;
   final List<PlaylistTrack> tracks;
   final LikedController liked;
   final PlayerController player;
+  final bool isReordering;
+  final int? selectedReorderIndex;
   final VoidCallback onBack;
   final ValueChanged<int> onPlay;
   final VoidCallback onDelete;
   final ValueChanged<PlaylistTrack> onToggleLiked;
   final ValueChanged<PlaylistTrack> onRemoveTrack;
+  final VoidCallback onStartReorder;
+  final VoidCallback onCancelReorder;
+  final VoidCallback onConfirmReorder;
+  final void Function(int oldIndex, int newIndex) onMoveReorder;
+  final ValueChanged<int> onSelectOrSwapReorder;
 
   @override
   Widget build(BuildContext context) {
@@ -225,22 +321,52 @@ class _PlaylistDetailView extends StatelessWidget {
             ),
             IconButton(
               tooltip: 'Delete playlist',
-              onPressed: onDelete,
+              onPressed: isReordering ? null : onDelete,
               icon: const Icon(Icons.delete_outline),
             ),
           ],
+        ),
+        Align(
+          alignment: Alignment.centerRight,
+          child: Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (isReordering) ...[
+                TextButton.icon(
+                  onPressed: onCancelReorder,
+                  icon: const Icon(Icons.close),
+                  label: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  onPressed: onConfirmReorder,
+                  icon: const Icon(Icons.check),
+                  label: const Text('Confirm order'),
+                ),
+              ] else
+                OutlinedButton.icon(
+                  onPressed: tracks.length < 2 ? null : onStartReorder,
+                  icon: const Icon(Icons.swap_vert),
+                  label: const Text('Reorder'),
+                ),
+            ],
+          ),
         ),
         const SizedBox(height: 12),
         Expanded(
           child: tracks.isEmpty
               ? const _PlaylistDetailMessage()
-              : ListView.separated(
+              : ReorderableListView.builder(
+                  buildDefaultDragHandles: false,
                   itemCount: tracks.length,
-                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  onReorder: isReordering ? onMoveReorder : (_, _) {},
                   itemBuilder: (context, index) {
                     final track = tracks[index];
-                    return _PlayingTileFrame(
-                      isPlaying: player.isCurrentTrack(track.trackId),
+                    final tile = _PlayingTileFrame(
+                      key: ValueKey(track.entryId),
+                      isPlaying:
+                          !isReordering && player.isCurrentTrack(track.trackId),
+                      isSelected: selectedReorderIndex == index,
                       child: ListTile(
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 4,
@@ -270,31 +396,48 @@ class _PlaylistDetailView extends StatelessWidget {
                         trailing: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            IconButton(
-                              tooltip: liked.isLiked(track.trackId)
-                                  ? 'Remove from liked'
-                                  : 'Add to liked',
-                              onPressed: () => onToggleLiked(track),
-                              icon: Icon(
-                                liked.isLiked(track.trackId)
-                                    ? Icons.favorite
-                                    : Icons.favorite_border,
+                            if (isReordering)
+                              const Padding(
+                                padding: EdgeInsets.symmetric(horizontal: 12),
+                                child: Icon(Icons.drag_handle),
+                              )
+                            else ...[
+                              IconButton(
+                                tooltip: liked.isLiked(track.trackId)
+                                    ? 'Remove from liked'
+                                    : 'Add to liked',
+                                onPressed: () => onToggleLiked(track),
+                                icon: Icon(
+                                  liked.isLiked(track.trackId)
+                                      ? Icons.favorite
+                                      : Icons.favorite_border,
+                                ),
                               ),
-                            ),
-                            IconButton(
-                              tooltip: 'Remove from playlist',
-                              onPressed: () => onRemoveTrack(track),
-                              icon: const Icon(Icons.remove_circle_outline),
-                            ),
-                            Icon(
-                              player.isCurrentTrack(track.trackId)
-                                  ? Icons.graphic_eq_outlined
-                                  : Icons.play_arrow_outlined,
-                            ),
+                              IconButton(
+                                tooltip: 'Remove from playlist',
+                                onPressed: () => onRemoveTrack(track),
+                                icon: const Icon(Icons.remove_circle_outline),
+                              ),
+                              Icon(
+                                player.isCurrentTrack(track.trackId)
+                                    ? Icons.graphic_eq_outlined
+                                    : Icons.play_arrow_outlined,
+                              ),
+                            ],
                           ],
                         ),
-                        onTap: () => onPlay(index),
+                        onTap: isReordering
+                            ? () => onSelectOrSwapReorder(index)
+                            : () => onPlay(index),
                       ),
+                    );
+                    if (!isReordering) {
+                      return tile;
+                    }
+                    return ReorderableDelayedDragStartListener(
+                      key: ValueKey('reorder-${track.entryId}'),
+                      index: index,
+                      child: tile,
                     );
                   },
                 ),
@@ -325,14 +468,20 @@ class _PlaylistDetailMessage extends StatelessWidget {
 }
 
 class _PlayingTileFrame extends StatelessWidget {
-  const _PlayingTileFrame({required this.isPlaying, required this.child});
+  const _PlayingTileFrame({
+    required this.isPlaying,
+    required this.child,
+    this.isSelected = false,
+    super.key,
+  });
 
   final bool isPlaying;
   final Widget child;
+  final bool isSelected;
 
   @override
   Widget build(BuildContext context) {
-    if (!isPlaying) {
+    if (!isPlaying && !isSelected) {
       return child;
     }
 
@@ -340,7 +489,7 @@ class _PlayingTileFrame extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border(left: BorderSide(color: colorScheme.primary, width: 4)),
-        color: colorScheme.primary.withValues(alpha: 0.08),
+        color: colorScheme.primary.withValues(alpha: isSelected ? 0.16 : 0.08),
       ),
       child: child,
     );

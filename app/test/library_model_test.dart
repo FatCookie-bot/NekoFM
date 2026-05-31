@@ -1017,6 +1017,49 @@ void main() {
     expect(await repository.loadTracks(), isEmpty);
   });
 
+  test('reorders liked tracks in sqlite', () async {
+    final database = DownloadDatabase(database: sqlite3.openInMemory());
+    addTearDown(database.close);
+    final repository = LikedRepository(database: database);
+
+    await repository.likeTrack(
+      const Track(
+        id: 'first',
+        title: 'First',
+        artist: 'Artist',
+        trackNumber: 1,
+        durationSeconds: 10,
+      ),
+    );
+    await repository.likeTrack(
+      const Track(
+        id: 'second',
+        title: 'Second',
+        artist: 'Artist',
+        trackNumber: 2,
+        durationSeconds: 10,
+      ),
+    );
+    await repository.likeTrack(
+      const Track(
+        id: 'third',
+        title: 'Third',
+        artist: 'Artist',
+        trackNumber: 3,
+        durationSeconds: 10,
+      ),
+    );
+
+    await repository.reorderTracks(const ['third', 'first', 'second']);
+    final reordered = await repository.loadTracks();
+
+    expect(
+      [for (final track in reordered) track.trackId],
+      ['third', 'first', 'second'],
+    );
+    expect([for (final track in reordered) track.position], [0, 1, 2]);
+  });
+
   test('persists custom playlists and tracks in sqlite', () async {
     final database = DownloadDatabase(database: sqlite3.openInMemory());
     addTearDown(database.close);
@@ -1049,6 +1092,16 @@ void main() {
     expect(tracks.last.position, 1);
     expect(tracks.first.entryId, isNot(tracks.last.entryId));
     expect(tracks.first.coverArtUri, 'https://example.test/cover.jpg');
+
+    await repository.reorderTracks(playlist.id, [
+      tracks.last.entryId,
+      tracks.first.entryId,
+    ]);
+    final reorderedTracks = await repository.loadTracks(playlist.id);
+    expect(reorderedTracks.first.entryId, tracks.last.entryId);
+    expect(reorderedTracks.last.entryId, tracks.first.entryId);
+    expect(reorderedTracks.first.position, 0);
+    expect(reorderedTracks.last.position, 1);
 
     await repository.removeEntry(playlist.id, tracks.first.entryId);
     expect(await repository.loadTracks(playlist.id), hasLength(1));

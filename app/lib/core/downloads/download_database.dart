@@ -96,7 +96,7 @@ class DownloadDatabase {
     final result = db.select('''
       SELECT *
       FROM liked_tracks
-      ORDER BY liked_at DESC
+      ORDER BY position ASC, liked_at DESC
       ''');
     return [for (final row in result) _likedTrackFromRow(row)];
   }
@@ -125,24 +125,58 @@ class DownloadDatabase {
         track_number,
         duration_seconds,
         liked_at,
+        position,
         album_id,
         album_name,
         cover_art_id,
         cover_art_uri,
         suffix
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(track_id) DO UPDATE SET
         title = excluded.title,
         artist = excluded.artist,
         track_number = excluded.track_number,
         duration_seconds = excluded.duration_seconds,
         liked_at = excluded.liked_at,
+        position = excluded.position,
         album_id = excluded.album_id,
         album_name = excluded.album_name,
         cover_art_id = excluded.cover_art_id,
         cover_art_uri = excluded.cover_art_uri,
         suffix = excluded.suffix
       ''', _likedTrackArguments(track));
+  }
+
+  Future<int> nextLikedPosition() async {
+    final db = await _open();
+    final result = db.select('''
+      SELECT COALESCE(MAX(position), -1) + 1 AS next_position
+      FROM liked_tracks
+      ''');
+    return result.first['next_position'] as int;
+  }
+
+  Future<void> reorderLikedTracks(List<String> trackIds) async {
+    final db = await _open();
+    db.execute('BEGIN IMMEDIATE');
+    try {
+      final statement = db.prepare('''
+        UPDATE liked_tracks
+        SET position = ?
+        WHERE track_id = ?
+        ''');
+      try {
+        for (var index = 0; index < trackIds.length; index += 1) {
+          statement.execute([index, trackIds[index]]);
+        }
+      } finally {
+        statement.close();
+      }
+      db.execute('COMMIT');
+    } on Object {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
   }
 
   Future<void> deleteLikedTrack(String trackId) async {
@@ -275,6 +309,40 @@ class DownloadDatabase {
     }
   }
 
+  Future<void> reorderPlaylistTracks(
+    String playlistId,
+    List<String> entryIds,
+  ) async {
+    final db = await _open();
+    db.execute('BEGIN IMMEDIATE');
+    try {
+      final statement = db.prepare('''
+        UPDATE playlist_tracks
+        SET position = ?
+        WHERE playlist_id = ? AND entry_id = ?
+        ''');
+      try {
+        for (var index = 0; index < entryIds.length; index += 1) {
+          statement.execute([index, playlistId, entryIds[index]]);
+        }
+      } finally {
+        statement.close();
+      }
+      db.execute(
+        '''
+        UPDATE playlists
+        SET updated_at = ?
+        WHERE id = ?
+        ''',
+        [DateTime.now().toIso8601String(), playlistId],
+      );
+      db.execute('COMMIT');
+    } on Object {
+      db.execute('ROLLBACK');
+      rethrow;
+    }
+  }
+
   Future<void> deletePlaylistTrack(String playlistId, String trackId) async {
     final db = await _open();
     db.execute('BEGIN IMMEDIATE');
@@ -362,6 +430,7 @@ class DownloadDatabase {
         track_number INTEGER NOT NULL,
         duration_seconds INTEGER NOT NULL,
         liked_at TEXT NOT NULL,
+        position INTEGER NOT NULL DEFAULT 0,
         album_id TEXT,
         album_name TEXT,
         cover_art_id TEXT,
@@ -369,9 +438,10 @@ class DownloadDatabase {
         suffix TEXT
       )
       ''');
+    _migrateLikedTracksPosition(db);
     db.execute('''
-      CREATE INDEX IF NOT EXISTS liked_tracks_liked_at_idx
-      ON liked_tracks(liked_at DESC)
+      CREATE INDEX IF NOT EXISTS liked_tracks_position_idx
+      ON liked_tracks(position, liked_at DESC)
       ''');
     db.execute('''
       CREATE INDEX IF NOT EXISTS liked_tracks_album_idx
@@ -484,6 +554,34 @@ class DownloadDatabase {
     db.execute('DROP TABLE playlist_tracks_legacy');
   }
 
+  void _migrateLikedTracksPosition(Database db) {
+    final columns = db.select('PRAGMA table_info(liked_tracks)');
+    final hasPosition = columns.any((row) => row['name'] == 'position');
+    if (!hasPosition) {
+      db.execute(
+        'ALTER TABLE liked_tracks ADD COLUMN position INTEGER NOT NULL DEFAULT 0',
+      );
+    }
+
+    final rows = db.select('''
+      SELECT track_id
+      FROM liked_tracks
+      ORDER BY liked_at DESC
+      ''');
+    final statement = db.prepare('''
+      UPDATE liked_tracks
+      SET position = ?
+      WHERE track_id = ?
+      ''');
+    try {
+      for (var index = 0; index < rows.length; index += 1) {
+        statement.execute([index, rows[index]['track_id']]);
+      }
+    } finally {
+      statement.close();
+    }
+  }
+
   Future<String> _defaultPath() async {
     final supportDirectory = await getApplicationSupportDirectory();
     final directory = Directory('${supportDirectory.path}/NekoFM');
@@ -550,6 +648,7 @@ class DownloadDatabase {
       likedAt:
           DateTime.tryParse(row['liked_at'] as String? ?? '') ??
           DateTime.fromMillisecondsSinceEpoch(0),
+      position: row['position'] as int? ?? 0,
       albumId: row['album_id'] as String?,
       albumName: row['album_name'] as String?,
       coverArtId: row['cover_art_id'] as String?,
@@ -566,6 +665,7 @@ class DownloadDatabase {
       track.trackNumber,
       track.durationSeconds,
       track.likedAt.toIso8601String(),
+      track.position,
       track.albumId,
       track.albumName,
       track.coverArtId,

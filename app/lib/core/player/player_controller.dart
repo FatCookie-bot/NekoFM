@@ -222,6 +222,44 @@ class PlayerController extends ChangeNotifier {
     return audioPlayer.seekToNext();
   }
 
+  Future<void> reorderCurrentQueue({
+    required String albumId,
+    required List<Track> tracks,
+  }) async {
+    if (_album?.id != albumId || tracks.length != _queue.length) {
+      return;
+    }
+
+    final workingTracks = _queue.toList();
+    final workingSources = _queueSources.toList();
+    for (var targetIndex = 0; targetIndex < tracks.length; targetIndex += 1) {
+      final targetTrackId = tracks[targetIndex].id;
+      var sourceIndex = -1;
+      for (var index = targetIndex; index < workingTracks.length; index += 1) {
+        if (workingTracks[index].id == targetTrackId) {
+          sourceIndex = index;
+          break;
+        }
+      }
+      if (sourceIndex < 0) {
+        return;
+      }
+      if (sourceIndex == targetIndex) {
+        continue;
+      }
+
+      await audioPlayer.moveAudioSource(sourceIndex, targetIndex);
+      final movedTrack = workingTracks.removeAt(sourceIndex);
+      workingTracks.insert(targetIndex, movedTrack);
+      final movedSource = workingSources.removeAt(sourceIndex);
+      workingSources.insert(targetIndex, movedSource);
+    }
+
+    _queue = List.unmodifiable(workingTracks);
+    _queueSources = List.unmodifiable(workingSources);
+    notifyListeners();
+  }
+
   Future<SavedServerProfile> _loadProfile() async {
     final profile = await _profileStore.load().timeout(
       const Duration(seconds: 3),

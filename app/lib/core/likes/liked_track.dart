@@ -8,6 +8,7 @@ class LikedTrack {
     required this.trackNumber,
     required this.durationSeconds,
     required this.likedAt,
+    required this.position,
     this.albumId,
     this.albumName,
     this.coverArtId,
@@ -21,6 +22,7 @@ class LikedTrack {
   final int trackNumber;
   final int durationSeconds;
   final DateTime likedAt;
+  final int position;
   final String? albumId;
   final String? albumName;
   final String? coverArtId;
@@ -42,7 +44,11 @@ class LikedTrack {
     );
   }
 
-  factory LikedTrack.fromTrack(Track track, {DateTime? likedAt}) {
+  factory LikedTrack.fromTrack(
+    Track track, {
+    DateTime? likedAt,
+    int position = 0,
+  }) {
     return LikedTrack(
       trackId: track.id,
       title: track.title,
@@ -50,6 +56,7 @@ class LikedTrack {
       trackNumber: track.trackNumber,
       durationSeconds: track.durationSeconds,
       likedAt: likedAt ?? DateTime.now(),
+      position: position,
       albumId: track.albumId,
       albumName: track.albumName,
       coverArtId: track.coverArtId,

@@ -135,6 +135,14 @@ Liked songs are stored inside SQLite as app metadata. M3U is intentionally not u
 
 M3U should be added later as an export format for SD card and car playback. Exported M3U files should use paths relative to the exported music folder, not absolute macOS paths.
 
+Liked songs have an explicit SQLite `position` value. The Liked page has a reorder mode:
+
+- `Reorder` unlocks order editing without stopping playback.
+- Tapping one song highlights it; tapping another song swaps the two songs.
+- Long-press/drag moves songs.
+- `Confirm order` persists the new order and updates the active Liked playback queue when Liked is currently playing.
+- `Cancel` leaves the saved order unchanged.
+
 ## Custom Playlists
 
 Custom playlists are stored in SQLite as app metadata:
@@ -149,4 +157,7 @@ Custom playlists are stored in SQLite as app metadata:
 - Playlists can intentionally contain duplicate copies of the same song.
 - The Playlists tab can create playlists, open them, play them, remove tracks, and delete playlists.
 - The Playlists tab can like/unlike tracks inside a playlist.
+- Playlist detail has the same reorder mode as Liked.
+- Playlist reorder persists `playlist_tracks.position` by `entry_id`, so duplicate copies of the same song can be moved independently.
+- Confirming playlist reorder updates the active playback queue when that playlist is currently playing, without restarting the current song.
 - Playlist playback uses the same player path as albums, so downloaded tracks are still preferred when available.

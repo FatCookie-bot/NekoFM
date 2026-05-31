@@ -17,7 +17,14 @@ class LikedRepository {
   }
 
   Future<void> likeTrack(Track track) {
-    return _database.upsertLikedTrack(LikedTrack.fromTrack(track));
+    return _likeTrack(track);
+  }
+
+  Future<void> _likeTrack(Track track) async {
+    final position = await _database.nextLikedPosition();
+    await _database.upsertLikedTrack(
+      LikedTrack.fromTrack(track, position: position),
+    );
   }
 
   Future<void> unlikeTrack(String trackId) {
@@ -30,6 +37,10 @@ class LikedRepository {
       return;
     }
 
-    await likeTrack(track);
+    await _likeTrack(track);
+  }
+
+  Future<void> reorderTracks(List<String> trackIds) {
+    return _database.reorderLikedTracks(trackIds);
   }
 }

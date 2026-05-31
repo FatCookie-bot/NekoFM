@@ -71,4 +71,15 @@ class PlaylistController extends ChangeNotifier {
     await load();
     await loadTracks(playlistId);
   }
+
+  Future<void> reorderTracks(
+    String playlistId,
+    List<PlaylistTrack> tracks,
+  ) async {
+    await _repository.reorderTracks(playlistId, [
+      for (final track in tracks) track.entryId,
+    ]);
+    await load();
+    await loadTracks(playlistId);
+  }
 }

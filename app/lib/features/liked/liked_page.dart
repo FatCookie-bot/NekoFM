@@ -22,6 +22,9 @@ class _LikedPageState extends ConsumerState<LikedPage> {
   final _libraryRepository = MusicLibraryRepository();
   bool _isOffline = false;
   bool _hasCheckedConnection = false;
+  bool _isReordering = false;
+  int? _selectedReorderIndex;
+  List<LikedTrack> _reorderDraft = const [];
 
   @override
   void initState() {
@@ -47,30 +50,68 @@ class _LikedPageState extends ConsumerState<LikedPage> {
           return const _LikedMessage();
         }
 
+        final visibleTracks = _isReordering ? _reorderDraft : liked.tracks;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            Align(
+              alignment: Alignment.centerRight,
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  if (_isReordering) ...[
+                    TextButton.icon(
+                      onPressed: _cancelLikedReorder,
+                      icon: const Icon(Icons.close),
+                      label: const Text('Cancel'),
+                    ),
+                    FilledButton.icon(
+                      onPressed: () => _confirmLikedReorder(liked),
+                      icon: const Icon(Icons.check),
+                      label: const Text('Confirm order'),
+                    ),
+                  ] else
+                    OutlinedButton.icon(
+                      onPressed: () => _startLikedReorder(liked.tracks),
+                      icon: const Icon(Icons.swap_vert),
+                      label: const Text('Reorder'),
+                    ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
             if (_isOffline && _hasCheckedConnection) ...[
               const _OfflineLikedNotice(),
               const SizedBox(height: 8),
             ],
             Expanded(
-              child: ListView.separated(
-                itemCount: liked.tracks.length,
-                separatorBuilder: (_, _) => const Divider(height: 1),
+              child: ReorderableListView.builder(
+                buildDefaultDragHandles: false,
+                itemCount: visibleTracks.length,
+                onReorder: _isReordering
+                    ? (oldIndex, newIndex) =>
+                          _moveLikedDraft(oldIndex, newIndex)
+                    : (_, _) {},
                 itemBuilder: (context, index) {
-                  final track = liked.tracks[index];
+                  final track = visibleTracks[index];
                   final download = downloads.trackState(track.trackId);
                   final isPlayable =
                       !_isOffline || download?.state == DownloadState.complete;
-                  return _LikedTrackTile(
+                  final tile = _LikedTrackTile(
+                    key: ValueKey(track.trackId),
                     track: track,
                     download: download,
                     isOffline: _isOffline,
-                    isPlaying: player.isCurrentTrack(track.trackId),
-                    onPlay: isPlayable
+                    isPlaying:
+                        !_isReordering && player.isCurrentTrack(track.trackId),
+                    isReordering: _isReordering,
+                    isSelectedForReorder: _selectedReorderIndex == index,
+                    onPlay: _isReordering
+                        ? () => _selectOrSwapLiked(index)
+                        : isPlayable
                         ? () =>
-                              _playLiked(liked.tracks, downloads.tracks, index)
+                              _playLiked(visibleTracks, downloads.tracks, index)
                         : null,
                     onDownload: () => downloads.downloadTrack(track.toTrack()),
                     onDeleteDownload: download == null
@@ -80,6 +121,14 @@ class _LikedPageState extends ConsumerState<LikedPage> {
                           }),
                     onUnlike: () => liked.unlikeTrack(track.trackId),
                   );
+                  if (!_isReordering) {
+                    return tile;
+                  }
+                  return ReorderableDelayedDragStartListener(
+                    key: ValueKey('reorder-${track.trackId}'),
+                    index: index,
+                    child: tile,
+                  );
                 },
               ),
             ),
@@ -87,6 +136,67 @@ class _LikedPageState extends ConsumerState<LikedPage> {
         );
       },
     );
+  }
+
+  void _startLikedReorder(List<LikedTrack> tracks) {
+    setState(() {
+      _isReordering = true;
+      _selectedReorderIndex = null;
+      _reorderDraft = List<LikedTrack>.of(tracks);
+    });
+  }
+
+  void _cancelLikedReorder() {
+    setState(() {
+      _isReordering = false;
+      _selectedReorderIndex = null;
+      _reorderDraft = const [];
+    });
+  }
+
+  Future<void> _confirmLikedReorder(LikedController liked) async {
+    final orderedTracks = List<LikedTrack>.of(_reorderDraft);
+    await liked.reorderTracks(orderedTracks);
+    await ref
+        .read(playerControllerProvider)
+        .reorderCurrentQueue(
+          albumId: 'liked',
+          tracks: [for (final track in orderedTracks) track.toTrack()],
+        );
+    if (!mounted) {
+      return;
+    }
+    _cancelLikedReorder();
+  }
+
+  void _moveLikedDraft(int oldIndex, int newIndex) {
+    setState(() {
+      if (newIndex > oldIndex) {
+        newIndex -= 1;
+      }
+      final moved = _reorderDraft.removeAt(oldIndex);
+      _reorderDraft.insert(newIndex, moved);
+      _selectedReorderIndex = null;
+    });
+  }
+
+  void _selectOrSwapLiked(int index) {
+    final selected = _selectedReorderIndex;
+    if (selected == null || selected == index) {
+      setState(() {
+        _selectedReorderIndex = selected == index ? null : index;
+      });
+      return;
+    }
+
+    setState(() {
+      final next = List<LikedTrack>.of(_reorderDraft);
+      final first = next[selected];
+      next[selected] = next[index];
+      next[index] = first;
+      _reorderDraft = next;
+      _selectedReorderIndex = null;
+    });
   }
 
   Future<void> _checkConnection() async {
@@ -134,10 +244,25 @@ class _LikedPageState extends ConsumerState<LikedPage> {
         return Future.value();
       }
 
+      final tracks = [
+        for (final download in playableDownloads) download.toTrack(),
+      ];
+      final selected = tracks[startIndex];
       return ref
           .read(playerControllerProvider)
-          .playDownloadedTracks(
-            downloads: playableDownloads,
+          .playAlbum(
+            album: Album(
+              id: 'liked',
+              name: 'Liked',
+              artist: selected.artist,
+              songCount: tracks.length,
+              durationSeconds: tracks.fold(
+                0,
+                (total, track) => total + track.durationSeconds,
+              ),
+              coverArtUri: selected.coverArtUri,
+            ),
+            tracks: tracks,
             startIndex: startIndex,
           );
     }
@@ -168,16 +293,21 @@ class _LikedTrackTile extends StatelessWidget {
     required this.download,
     required this.isOffline,
     required this.isPlaying,
+    required this.isReordering,
+    required this.isSelectedForReorder,
     required this.onPlay,
     required this.onDownload,
     required this.onDeleteDownload,
     required this.onUnlike,
+    super.key,
   });
 
   final LikedTrack track;
   final DownloadedTrack? download;
   final bool isOffline;
   final bool isPlaying;
+  final bool isReordering;
+  final bool isSelectedForReorder;
   final VoidCallback? onPlay;
   final VoidCallback onDownload;
   final VoidCallback? onDeleteDownload;
@@ -207,6 +337,7 @@ class _LikedTrackTile extends StatelessWidget {
 
     return _PlayingTileFrame(
       isPlaying: isPlaying,
+      isSelected: isSelectedForReorder,
       child: Opacity(
         opacity: isUnavailableOffline ? 0.48 : 1,
         child: ListTile(
@@ -232,7 +363,12 @@ class _LikedTrackTile extends StatelessWidget {
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (isQueued || isDownloading)
+              if (isReordering)
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12),
+                  child: Icon(Icons.drag_handle),
+                )
+              else if (isQueued || isDownloading)
                 SizedBox.square(
                   dimension: 40,
                   child: Padding(
@@ -288,14 +424,19 @@ class _LikedTrackTile extends StatelessWidget {
 }
 
 class _PlayingTileFrame extends StatelessWidget {
-  const _PlayingTileFrame({required this.isPlaying, required this.child});
+  const _PlayingTileFrame({
+    required this.isPlaying,
+    required this.child,
+    this.isSelected = false,
+  });
 
   final bool isPlaying;
   final Widget child;
+  final bool isSelected;
 
   @override
   Widget build(BuildContext context) {
-    if (!isPlaying) {
+    if (!isPlaying && !isSelected) {
       return child;
     }
 
@@ -303,7 +444,7 @@ class _PlayingTileFrame extends StatelessWidget {
     return DecoratedBox(
       decoration: BoxDecoration(
         border: Border(left: BorderSide(color: colorScheme.primary, width: 4)),
-        color: colorScheme.primary.withValues(alpha: 0.08),
+        color: colorScheme.primary.withValues(alpha: isSelected ? 0.16 : 0.08),
       ),
       child: child,
     );
