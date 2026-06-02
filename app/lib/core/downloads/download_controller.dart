@@ -65,11 +65,21 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<void> repair() async {
-    final repairResult = await _repository.repairDownloads();
-    _tracks = repairResult.tracks;
+    var repairResult = await _repository.repairDownloads();
+    final coverRepairResult = await _downloadMissingAlbumCovers(
+      repairResult.tracks,
+    );
+    _tracks = coverRepairResult.tracks;
+    repairResult = repairResult.copyWith(
+      tracks: _tracks,
+      downloadedCoverCount: coverRepairResult.downloadedCoverCount,
+    );
     _lastRepairResult = repairResult;
     _isLoaded = true;
     notifyListeners();
+    if (coverRepairResult.downloadedCoverCount > 0) {
+      await _repository.saveTracks(_tracks);
+    }
     _processQueue();
   }
 
@@ -81,11 +91,21 @@ class DownloadController extends ChangeNotifier {
   }
 
   Future<void> _load() async {
-    final repairResult = await _repository.repairDownloads();
-    _tracks = repairResult.tracks;
+    var repairResult = await _repository.repairDownloads();
+    final coverRepairResult = await _downloadMissingAlbumCovers(
+      repairResult.tracks,
+    );
+    _tracks = coverRepairResult.tracks;
+    repairResult = repairResult.copyWith(
+      tracks: _tracks,
+      downloadedCoverCount: coverRepairResult.downloadedCoverCount,
+    );
     _lastRepairResult = repairResult;
     _isLoaded = true;
     notifyListeners();
+    if (coverRepairResult.downloadedCoverCount > 0) {
+      await _repository.saveTracks(_tracks);
+    }
     _processQueue();
   }
 
@@ -327,10 +347,13 @@ class DownloadController extends ChangeNotifier {
       for (final track in _tracks)
         if (track.trackId != trackId) track,
     ];
+    final existingCoverPath = _repository.coverPathForDownloadedTrack(existing);
     final keepCover =
-        existing.localCoverPath != null &&
+        existingCoverPath != null &&
         nextTracks.any(
-          (track) => track.localCoverPath == existing.localCoverPath,
+          (track) =>
+              _repository.coverPathForDownloadedTrack(track) ==
+              existingCoverPath,
         );
 
     await _repository.deleteDownloadedTrackFiles(
@@ -354,10 +377,13 @@ class DownloadController extends ChangeNotifier {
       for (final track in _tracks)
         if (track.trackId != item.trackId) track,
     ];
+    final existingCoverPath = _repository.coverPathForDownloadedTrack(existing);
     final keepCover =
-        existing.localCoverPath != null &&
+        existingCoverPath != null &&
         nextTracks.any(
-          (track) => track.localCoverPath == existing.localCoverPath,
+          (track) =>
+              _repository.coverPathForDownloadedTrack(track) ==
+              existingCoverPath,
         );
 
     await _repository.deleteDownloadedTrackFiles(
@@ -433,6 +459,55 @@ class DownloadController extends ChangeNotifier {
     }
   }
 
+  Future<_MissingCoverRepairResult> _downloadMissingAlbumCovers(
+    List<DownloadedTrack> tracks,
+  ) async {
+    final coverPathsByFolder = <String, String>{};
+    final repairedTracks = <DownloadedTrack>[];
+    var downloadedCoverCount = 0;
+
+    for (final track in tracks) {
+      if (track.state != DownloadState.complete ||
+          track.localCoverPath != null ||
+          track.coverArtUri == null) {
+        repairedTracks.add(track);
+        continue;
+      }
+
+      final albumFolder = File(track.localPath).parent.path;
+      final existingCoverPath = coverPathsByFolder[albumFolder];
+      if (existingCoverPath != null) {
+        repairedTracks.add(track.copyWith(localCoverPath: existingCoverPath));
+        continue;
+      }
+
+      final inferredCoverPath = _repository.coverPathForDownloadedTrack(track);
+      if (inferredCoverPath != null) {
+        final inferredCover = File(inferredCoverPath);
+        if (await inferredCover.exists() && await inferredCover.length() > 0) {
+          coverPathsByFolder[albumFolder] = inferredCoverPath;
+          repairedTracks.add(track.copyWith(localCoverPath: inferredCoverPath));
+          continue;
+        }
+      }
+
+      final downloadedCoverPath = await _downloadCover(track.toTrack());
+      if (downloadedCoverPath == null) {
+        repairedTracks.add(track);
+        continue;
+      }
+
+      coverPathsByFolder[albumFolder] = downloadedCoverPath;
+      downloadedCoverCount += 1;
+      repairedTracks.add(track.copyWith(localCoverPath: downloadedCoverPath));
+    }
+
+    return _MissingCoverRepairResult(
+      tracks: List.unmodifiable(repairedTracks),
+      downloadedCoverCount: downloadedCoverCount,
+    );
+  }
+
   void _upsert(DownloadedTrack item) {
     final next = [
       item,
@@ -449,4 +524,14 @@ class DownloadController extends ChangeNotifier {
     _dio.close(force: true);
     super.dispose();
   }
+}
+
+class _MissingCoverRepairResult {
+  const _MissingCoverRepairResult({
+    required this.tracks,
+    required this.downloadedCoverCount,
+  });
+
+  final List<DownloadedTrack> tracks;
+  final int downloadedCoverCount;
 }

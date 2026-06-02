@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/library/album.dart';
+import '../../core/library/music_library_repository.dart';
 import '../../core/likes/liked_controller.dart';
 import '../../core/player/player_controller.dart';
 import '../../core/playlists/playlist.dart';
@@ -18,16 +19,19 @@ class PlaylistsPage extends ConsumerStatefulWidget {
 }
 
 class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
+  final _libraryRepository = MusicLibraryRepository();
   Playlist? _selectedPlaylist;
   bool _isReordering = false;
   int? _selectedReorderIndex;
   List<PlaylistTrack> _reorderDraft = const [];
+  bool _isOffline = false;
 
   @override
   void initState() {
     super.initState();
     ref.read(playlistControllerProvider).load();
     ref.read(likedControllerProvider).load();
+    _checkConnection();
   }
 
   @override
@@ -230,6 +234,8 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
           tracks: [for (final track in tracks) track.toTrack()],
           queueKeys: [for (final track in tracks) track.entryId],
           startIndex: index,
+          skipUnavailable: _isOffline,
+          localOnly: _isOffline,
         );
   }
 
@@ -259,7 +265,28 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
           tracks: [for (final track in shuffled) track.toTrack()],
           queueKeys: [for (final track in shuffled) track.entryId],
           startIndex: 0,
+          skipUnavailable: _isOffline,
+          localOnly: _isOffline,
         );
+  }
+
+  Future<void> _checkConnection() async {
+    try {
+      await _libraryRepository.getAlbums();
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isOffline = false;
+      });
+    } on Object {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _isOffline = true;
+      });
+    }
   }
 
   void _startPlaylistReorder(List<PlaylistTrack> tracks) {

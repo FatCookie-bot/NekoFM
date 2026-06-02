@@ -349,6 +349,123 @@ void main() {
     expect(details.single.tracks.single.coverArtUri, Uri.file(coverFile.path));
   });
 
+  test(
+    'deletes inferred album cover when last local song is removed',
+    () async {
+      SharedPreferencesAsyncPlatform.instance =
+          InMemorySharedPreferencesAsync.empty();
+      final directory = await Directory.systemTemp.createTemp('nekofm-test-');
+      addTearDown(() async {
+        SharedPreferencesAsyncPlatform.instance = null;
+        if (await directory.exists()) {
+          await directory.delete(recursive: true);
+        }
+      });
+
+      final audioFile = File('${directory.path}/01 - Sonne.flac');
+      final coverFile = File('${directory.path}/cover.jpg');
+      await audioFile.writeAsBytes([1, 2, 3, 4]);
+      await coverFile.writeAsBytes([5, 6, 7, 8]);
+      final database = DownloadDatabase(database: sqlite3.openInMemory());
+      addTearDown(database.close);
+      final repository = DownloadRepository(
+        preferences: SharedPreferencesAsync(),
+        database: database,
+      );
+      final download = DownloadedTrack(
+        trackId: 'track-1',
+        title: 'Sonne',
+        artist: 'Rammstein',
+        trackNumber: 3,
+        durationSeconds: 272,
+        localPath: audioFile.path,
+        state: DownloadState.complete,
+        updatedAt: DateTime(2026, 5, 16),
+        albumId: 'album-1',
+        albumName: 'Mutter',
+        suffix: 'flac',
+        bytes: 4,
+      );
+
+      await repository.deleteDownloadedTrackFiles(download);
+
+      expect(await audioFile.exists(), isFalse);
+      expect(await coverFile.exists(), isFalse);
+    },
+  );
+
+  test(
+    'keeps inferred album cover while another local album song remains',
+    () async {
+      SharedPreferencesAsyncPlatform.instance =
+          InMemorySharedPreferencesAsync.empty();
+      final directory = await Directory.systemTemp.createTemp('nekofm-test-');
+      addTearDown(() async {
+        SharedPreferencesAsyncPlatform.instance = null;
+        if (await directory.exists()) {
+          await directory.delete(recursive: true);
+        }
+      });
+
+      final firstAudioFile = File('${directory.path}/01 - Sonne.flac');
+      final secondAudioFile = File('${directory.path}/02 - Links.flac');
+      final coverFile = File('${directory.path}/cover.jpg');
+      await firstAudioFile.writeAsBytes([1, 2, 3, 4]);
+      await secondAudioFile.writeAsBytes([4, 3, 2, 1]);
+      await coverFile.writeAsBytes([5, 6, 7, 8]);
+      final database = DownloadDatabase(database: sqlite3.openInMemory());
+      addTearDown(database.close);
+      final repository = DownloadRepository(
+        preferences: SharedPreferencesAsync(),
+        database: database,
+      );
+      final firstDownload = DownloadedTrack(
+        trackId: 'track-1',
+        title: 'Sonne',
+        artist: 'Rammstein',
+        trackNumber: 3,
+        durationSeconds: 272,
+        localPath: firstAudioFile.path,
+        state: DownloadState.complete,
+        updatedAt: DateTime(2026, 5, 16),
+        albumId: 'album-1',
+        albumName: 'Mutter',
+        suffix: 'flac',
+        bytes: 4,
+      );
+      final secondDownload = DownloadedTrack(
+        trackId: 'track-2',
+        title: 'Links 2 3 4',
+        artist: 'Rammstein',
+        trackNumber: 2,
+        durationSeconds: 216,
+        localPath: secondAudioFile.path,
+        state: DownloadState.complete,
+        updatedAt: DateTime(2026, 5, 16),
+        albumId: 'album-1',
+        albumName: 'Mutter',
+        suffix: 'flac',
+        bytes: 4,
+      );
+
+      final keepCover =
+          repository.coverPathForDownloadedTrack(firstDownload) != null &&
+          [secondDownload].any(
+            (track) =>
+                repository.coverPathForDownloadedTrack(track) ==
+                repository.coverPathForDownloadedTrack(firstDownload),
+          );
+      await repository.deleteDownloadedTrackFiles(
+        firstDownload,
+        deleteCover: !keepCover,
+      );
+
+      expect(await firstAudioFile.exists(), isFalse);
+      expect(await secondAudioFile.exists(), isTrue);
+      expect(await coverFile.exists(), isTrue);
+    },
+  );
+
   test('repairs interrupted downloads back to queued', () async {
     SharedPreferencesAsyncPlatform.instance =
         InMemorySharedPreferencesAsync.empty();

@@ -404,10 +404,9 @@ class _QueueList extends StatelessWidget {
       stream: controller.audioPlayer.currentIndexStream,
       initialData: controller.audioPlayer.currentIndex,
       builder: (context, snapshot) {
-        final currentIndex = (snapshot.data ?? 0).clamp(
-          0,
-          controller.queue.length - 1,
-        );
+        final currentIndex = (snapshot.data ?? 0)
+            .clamp(0, controller.queue.length - 1)
+            .toInt();
         final visibleQueueIndexes = _visibleQueueIndexes(
           currentIndex: currentIndex,
           queueLength: controller.queue.length,
@@ -453,10 +452,7 @@ class _QueueList extends StatelessWidget {
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                onTap: () => controller.audioPlayer.seek(
-                  Duration.zero,
-                  index: queueIndex,
-                ),
+                onTap: () => controller.seekToQueueIndex(queueIndex),
               ),
             );
           },

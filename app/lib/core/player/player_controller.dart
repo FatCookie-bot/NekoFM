@@ -102,6 +102,8 @@ class PlayerController extends ChangeNotifier {
     required List<Track> tracks,
     required int startIndex,
     List<String>? queueKeys,
+    bool skipUnavailable = false,
+    bool localOnly = false,
   }) async {
     if (tracks.isEmpty) {
       return;
@@ -123,9 +125,40 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final resolvedSources = [
-        for (final track in tracks) await _sourceForTrack(track),
-      ];
+      final resolvedTracks = <Track>[];
+      final playableQueueKeys = <String>[];
+      final resolvedSources = <_ResolvedTrackSource>[];
+      var playableStartIndex = 0;
+      for (var index = 0; index < tracks.length; index += 1) {
+        try {
+          final source = await _sourceForTrack(
+            tracks[index],
+            localOnly: localOnly,
+          );
+          if (index < startIndex) {
+            playableStartIndex += 1;
+          }
+          resolvedTracks.add(tracks[index]);
+          playableQueueKeys.add(resolvedQueueKeys[index]);
+          resolvedSources.add(source);
+        } on Object {
+          if (!skipUnavailable) {
+            rethrow;
+          }
+        }
+      }
+
+      if (resolvedTracks.isEmpty) {
+        throw const MusicServerException('No playable tracks were available.');
+      }
+
+      if (playableStartIndex >= resolvedTracks.length) {
+        playableStartIndex = 0;
+      }
+
+      _queue = List.unmodifiable(resolvedTracks);
+      _queueKeys = List.unmodifiable(playableQueueKeys);
+      _baseQueueKeys = List.unmodifiable(playableQueueKeys);
       _queueSources = [
         for (final source in resolvedSources) source.playbackSource,
       ];
@@ -137,17 +170,26 @@ class PlayerController extends ChangeNotifier {
 
       await audioPlayer.setAudioSources(
         sources,
-        initialIndex: startIndex.clamp(0, tracks.length - 1),
+        initialIndex: playableStartIndex,
         initialPosition: Duration.zero,
       );
       await audioPlayer.play();
     } on MusicServerException catch (error) {
+      if (skipUnavailable || localOnly) {
+        await _clearPlaybackQueue();
+      }
       _errorMessage = error.message;
     } on PlayerException catch (error) {
+      if (skipUnavailable || localOnly) {
+        await _clearPlaybackQueue();
+      }
       _errorMessage = error.message ?? 'The track could not be loaded.';
     } on PlayerInterruptedException {
       _errorMessage = null;
     } on Object catch (error) {
+      if (skipUnavailable || localOnly) {
+        await _clearPlaybackQueue();
+      }
       _errorMessage = 'Playback failed: $error';
     } finally {
       _isLoading = false;
@@ -171,8 +213,11 @@ class PlayerController extends ChangeNotifier {
       for (final download in completeDownloads) download.toTrack(),
     ];
     final album = Album(
-      id: 'downloads',
-      name: 'Downloads',
+      id:
+          completeDownloads[safeStartIndex].albumId ??
+          completeDownloads[safeStartIndex].albumName ??
+          'downloads',
+      name: completeDownloads[safeStartIndex].albumName ?? 'Downloads',
       artist: completeDownloads[safeStartIndex].artist,
       songCount: completeDownloads.length,
       durationSeconds: completeDownloads.fold(
@@ -252,6 +297,62 @@ class PlayerController extends ChangeNotifier {
 
   Future<void> seekToNext() {
     return audioPlayer.seekToNext();
+  }
+
+  Future<void> seekToQueueIndex(int index) {
+    if (index < 0 || index >= _queue.length) {
+      return Future.value();
+    }
+
+    return audioPlayer.seek(Duration.zero, index: index);
+  }
+
+  Future<void> removeDeletedLocalTracks(Iterable<String> trackIds) async {
+    final deletedTrackIds = trackIds.toSet();
+    if (deletedTrackIds.isEmpty || _queue.isEmpty) {
+      return;
+    }
+
+    final indexesToRemove = <int>[];
+    for (var index = 0; index < _queue.length; index += 1) {
+      if (_queueSources[index] == PlaybackSource.local &&
+          deletedTrackIds.contains(_queue[index].id)) {
+        indexesToRemove.add(index);
+      }
+    }
+    if (indexesToRemove.isEmpty) {
+      return;
+    }
+
+    for (final index in indexesToRemove.reversed) {
+      await audioPlayer.removeAudioSourceAt(index);
+    }
+
+    final removed = indexesToRemove.toSet();
+    _queue = List.unmodifiable([
+      for (var index = 0; index < _queue.length; index += 1)
+        if (!removed.contains(index)) _queue[index],
+    ]);
+    _queueKeys = List.unmodifiable([
+      for (var index = 0; index < _queueKeys.length; index += 1)
+        if (!removed.contains(index)) _queueKeys[index],
+    ]);
+    _queueSources = List.unmodifiable([
+      for (var index = 0; index < _queueSources.length; index += 1)
+        if (!removed.contains(index)) _queueSources[index],
+    ]);
+    _baseQueueKeys = [
+      for (final key in _baseQueueKeys)
+        if (_queueKeys.contains(key)) key,
+    ];
+
+    if (_queue.isEmpty) {
+      await audioPlayer.stop();
+      _album = null;
+      _isShuffleEnabled = false;
+    }
+
+    notifyListeners();
   }
 
   Future<void> toggleRepeat() {
@@ -385,6 +486,16 @@ class PlayerController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> _clearPlaybackQueue() async {
+    await audioPlayer.stop();
+    _album = null;
+    _queue = const [];
+    _queueKeys = const [];
+    _baseQueueKeys = const [];
+    _queueSources = const [];
+    _isShuffleEnabled = false;
+  }
+
   Future<SavedServerProfile> _loadProfile() async {
     final profile = await _profileStore.load().timeout(
       const Duration(seconds: 3),
@@ -406,7 +517,10 @@ class PlayerController extends ChangeNotifier {
     return profile;
   }
 
-  Future<_ResolvedTrackSource> _sourceForTrack(Track track) async {
+  Future<_ResolvedTrackSource> _sourceForTrack(
+    Track track, {
+    bool localOnly = false,
+  }) async {
     final localPath = await _downloadRepository.localFileForTrack(track.id);
     if (localPath != null) {
       return _ResolvedTrackSource(
@@ -414,6 +528,10 @@ class PlayerController extends ChangeNotifier {
         uri: Uri.file(localPath),
         playbackSource: PlaybackSource.local,
       );
+    }
+
+    if (localOnly) {
+      throw const FileSystemException('Track is not downloaded.');
     }
 
     final profile = await _loadProfile();

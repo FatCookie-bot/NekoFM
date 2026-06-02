@@ -37,6 +37,7 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
   Timer? _searchDebounce;
   String _searchQuery = '';
   bool _isShowingDownloadedLibrary = false;
+  bool _isShufflingLibrary = false;
 
   @override
   void initState() {
@@ -100,8 +101,10 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
                   ? _AlbumBrowser(
                       albumsFuture: _albumsFuture,
                       isDownloadedLibrary: _isShowingDownloadedLibrary,
+                      isShuffling: _isShufflingLibrary,
                       player: player,
                       onRefresh: _loadAlbums,
+                      onShuffleAll: _shuffleLibrary,
                       onOpenAlbum: _openAlbum,
                     )
                   : _SearchResultsView(
@@ -261,8 +264,84 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
         );
   }
 
+  Future<void> _shuffleLibrary(List<Album> albums) async {
+    if (_isShufflingLibrary) {
+      return;
+    }
+
+    setState(() {
+      _isShufflingLibrary = true;
+    });
+    final tracks = <Track>[];
+    try {
+      if (_isShowingDownloadedLibrary) {
+        for (final detail in _downloadedAlbumDetails.values) {
+          tracks.addAll(detail.tracks);
+        }
+      } else {
+        for (final album in albums) {
+          try {
+            final detail = await _repository.getAlbum(album.id);
+            tracks.addAll(detail.tracks);
+          } on Object {
+            final downloadedDetail = _downloadedAlbumDetails[album.id];
+            if (downloadedDetail != null) {
+              tracks.addAll(downloadedDetail.tracks);
+            }
+          }
+        }
+      }
+
+      if (tracks.isEmpty) {
+        return;
+      }
+
+      tracks.shuffle();
+      final album = Album(
+        id: _isShowingDownloadedLibrary
+            ? 'downloaded-library-shuffle'
+            : 'library-shuffle',
+        name: _isShowingDownloadedLibrary
+            ? 'Downloaded library shuffle'
+            : 'Library shuffle',
+        artist: 'Library',
+        songCount: tracks.length,
+        durationSeconds: tracks.fold(
+          0,
+          (total, track) => total + track.durationSeconds,
+        ),
+        coverArtUri: tracks.first.coverArtUri,
+      );
+      await ref
+          .read(playerControllerProvider)
+          .playAlbum(
+            album: album,
+            tracks: tracks,
+            startIndex: 0,
+            skipUnavailable: true,
+            localOnly: _isShowingDownloadedLibrary,
+          );
+      if (!mounted) {
+        return;
+      }
+      final queuedCount = ref.read(playerControllerProvider).queue.length;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Shuffled $queuedCount songs.')));
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isShufflingLibrary = false;
+        });
+      }
+    }
+  }
+
   Future<void> _deleteTrackDownload(Track track) async {
     await ref.read(downloadControllerProvider).deleteTrack(track.id);
+    await ref.read(playerControllerProvider).removeDeletedLocalTracks([
+      track.id,
+    ]);
     if (!_isShowingDownloadedLibrary || _selectedAlbum == null) {
       return;
     }
@@ -363,6 +442,9 @@ class _LibraryPageState extends ConsumerState<LibraryPage> {
 
   Future<void> _deleteAlbumDownloads(List<Track> tracks) async {
     await ref.read(downloadControllerProvider).deleteTracks(tracks);
+    await ref.read(playerControllerProvider).removeDeletedLocalTracks([
+      for (final track in tracks) track.id,
+    ]);
     if (!_isShowingDownloadedLibrary || !mounted) {
       return;
     }
@@ -430,15 +512,19 @@ class _AlbumBrowser extends StatelessWidget {
   const _AlbumBrowser({
     required this.albumsFuture,
     required this.isDownloadedLibrary,
+    required this.isShuffling,
     required this.player,
     required this.onRefresh,
+    required this.onShuffleAll,
     required this.onOpenAlbum,
   });
 
   final Future<List<Album>>? albumsFuture;
   final bool isDownloadedLibrary;
+  final bool isShuffling;
   final PlayerController player;
   final VoidCallback onRefresh;
+  final Future<void> Function(List<Album> albums) onShuffleAll;
   final ValueChanged<Album> onOpenAlbum;
 
   @override
@@ -480,6 +566,33 @@ class _AlbumBrowser extends StatelessWidget {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            Align(
+              alignment: Alignment.centerRight,
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.tonalIcon(
+                    onPressed: albums.isEmpty || isShuffling
+                        ? null
+                        : () => onShuffleAll(albums),
+                    icon: isShuffling
+                        ? const SizedBox.square(
+                            dimension: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.shuffle),
+                    label: Text(isShuffling ? 'Shuffling...' : 'Shuffle all'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: onRefresh,
+                    icon: const Icon(Icons.refresh_outlined),
+                    label: const Text('Refresh'),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 8),
             if (isDownloadedLibrary) ...[
               const _OfflineLibraryNotice(),
               const SizedBox(height: 8),

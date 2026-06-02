@@ -155,11 +155,24 @@ class DownloadRepository {
   }) async {
     await _deleteFileIfPresent(track.localPath);
     await _deleteFileIfPresent('${track.localPath}.partial');
-    final coverPath = track.localCoverPath;
+    final coverPath = coverPathForDownloadedTrack(track);
     if (deleteCover && coverPath != null) {
       await _deleteFileIfPresent(coverPath);
       await _deleteFileIfPresent('$coverPath.partial');
     }
+  }
+
+  String? coverPathForDownloadedTrack(DownloadedTrack track) {
+    final savedPath = track.localCoverPath;
+    if (savedPath != null && savedPath.isNotEmpty) {
+      return savedPath;
+    }
+
+    if (track.localPath.isEmpty) {
+      return null;
+    }
+
+    return '${File(track.localPath).parent.path}/cover.jpg';
   }
 
   Future<DownloadedTrack?> trackById(String trackId) async {
@@ -676,13 +689,31 @@ class DownloadRepairResult {
     required this.removedAudioCount,
     required this.clearedCoverCount,
     required this.recoveredCoverCount,
+    this.downloadedCoverCount = 0,
   });
 
   final List<DownloadedTrack> tracks;
   final int removedAudioCount;
   final int clearedCoverCount;
   final int recoveredCoverCount;
+  final int downloadedCoverCount;
 
   bool get changed =>
-      removedAudioCount > 0 || clearedCoverCount > 0 || recoveredCoverCount > 0;
+      removedAudioCount > 0 ||
+      clearedCoverCount > 0 ||
+      recoveredCoverCount > 0 ||
+      downloadedCoverCount > 0;
+
+  DownloadRepairResult copyWith({
+    List<DownloadedTrack>? tracks,
+    int? downloadedCoverCount,
+  }) {
+    return DownloadRepairResult(
+      tracks: tracks ?? this.tracks,
+      removedAudioCount: removedAudioCount,
+      clearedCoverCount: clearedCoverCount,
+      recoveredCoverCount: recoveredCoverCount,
+      downloadedCoverCount: downloadedCoverCount ?? this.downloadedCoverCount,
+    );
+  }
 }

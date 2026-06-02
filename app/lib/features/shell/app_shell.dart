@@ -18,7 +18,10 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
   int _libraryResetKey = 0;
+  int _likedResetKey = 0;
   int _playlistsResetKey = 0;
+  int _downloadsResetKey = 0;
+  int _settingsResetKey = 0;
 
   static const _destinations = <_ShellDestination>[
     _ShellDestination(label: 'Library', icon: Icons.album_outlined),
@@ -93,8 +96,17 @@ class _AppShellState extends State<AppShell> {
       if (index == 0 && _selectedIndex == 0) {
         _libraryResetKey += 1;
       }
+      if (index == 2 && _selectedIndex == 2) {
+        _likedResetKey += 1;
+      }
       if (index == 3 && _selectedIndex == 3) {
         _playlistsResetKey += 1;
+      }
+      if (index == 4 && _selectedIndex == 4) {
+        _downloadsResetKey += 1;
+      }
+      if (index == 5 && _selectedIndex == 5) {
+        _settingsResetKey += 1;
       }
       _selectedIndex = index;
     });
@@ -104,10 +116,10 @@ class _AppShellState extends State<AppShell> {
     return switch (index) {
       0 => LibraryPage(key: ValueKey(_libraryResetKey)),
       1 => const PlayerPage(),
-      2 => const LikedPage(),
+      2 => LikedPage(key: ValueKey(_likedResetKey)),
       3 => PlaylistsPage(key: ValueKey(_playlistsResetKey)),
-      4 => const DownloadsPage(),
-      5 => const SettingsPage(),
+      4 => DownloadsPage(key: ValueKey(_downloadsResetKey)),
+      5 => SettingsPage(key: ValueKey(_settingsResetKey)),
       _ => const LibraryPage(),
     };
   }

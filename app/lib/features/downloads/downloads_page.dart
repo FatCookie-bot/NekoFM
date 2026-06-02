@@ -17,6 +17,7 @@ import '../../core/player/player_controller.dart';
 import '../../core/playlists/playlist_controller.dart';
 import '../../core/server/music_server_client.dart';
 import '../../core/server/secure_server_profile_store.dart';
+import '../player/album_art.dart';
 import '../player/playback_formatting.dart';
 
 class DownloadsPage extends ConsumerStatefulWidget {
@@ -83,16 +84,25 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
           );
         }
 
+        final albumGroups = _groupDownloadsByAlbum(controller.tracks);
+        final totalBytes = controller.tracks.fold<int>(
+          0,
+          (total, track) => total + (track.bytes ?? 0),
+        );
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _DownloadsToolbar(
               repairMessage: _repairMessage(controller.lastRepairResult),
+              albumCount: albumGroups.length,
+              totalBytes: totalBytes,
               onRepair: controller.repair,
               failedCount: controller.failedCount,
               onRetryFailed: controller.retryFailedDownloads,
               isExporting: _isExporting,
               onExport: () => _exportDownloads(controller.tracks),
+              onOpenFolder: _openDownloadsFolder,
             ),
             if (_exportMessage != null) ...[
               const SizedBox(height: 8),
@@ -101,27 +111,40 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
             const SizedBox(height: 8),
             Expanded(
               child: ListView.separated(
-                itemCount: controller.tracks.length,
+                itemCount: albumGroups.length,
                 separatorBuilder: (_, _) => const Divider(height: 1),
                 itemBuilder: (context, index) {
-                  return _DownloadTile(
-                    download: controller.tracks[index],
-                    isPlaying: player.isCurrentTrack(
-                      controller.tracks[index].trackId,
-                    ),
-                    onPlay: () => _playDownload(controller.tracks, index),
-                    onRetry: () =>
-                        controller.retryDownload(controller.tracks[index]),
-                    onCancel: () => controller.cancelDownload(
-                      controller.tracks[index].trackId,
-                    ),
-                    onDelete: () => _confirmDeleteDownload(
-                      context,
-                      controller.tracks[index],
-                      () => controller.deleteTrack(
-                        controller.tracks[index].trackId,
-                      ),
-                    ),
+                  final group = albumGroups[index];
+                  return _DownloadAlbumSection(
+                    group: group,
+                    player: player,
+                    onPlayAlbum: () => _playAlbumDownloads(group.tracks),
+                    onDeleteAlbum: () =>
+                        _confirmDeleteAlbum(context, group, () async {
+                          for (final track in group.tracks) {
+                            await controller.deleteTrack(track.trackId);
+                          }
+                          await player.removeDeletedLocalTracks([
+                            for (final track in group.tracks) track.trackId,
+                          ]);
+                        }),
+                    buildTrackTile: (download, trackIndex) {
+                      return _DownloadTile(
+                        download: download,
+                        isPlaying: player.isCurrentTrack(download.trackId),
+                        onPlay: () => _playDownload(group.tracks, trackIndex),
+                        onRetry: () => controller.retryDownload(download),
+                        onCancel: () =>
+                            controller.cancelDownload(download.trackId),
+                        onDelete: () =>
+                            _confirmDeleteDownload(context, download, () async {
+                              await controller.deleteTrack(download.trackId);
+                              await player.removeDeletedLocalTracks([
+                                download.trackId,
+                              ]);
+                            }),
+                      );
+                    },
                   );
                 },
               ),
@@ -130,6 +153,81 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
         );
       },
     );
+  }
+
+  List<_DownloadAlbumGroup> _groupDownloadsByAlbum(
+    List<DownloadedTrack> downloads,
+  ) {
+    final grouped = <String, List<DownloadedTrack>>{};
+    for (final download in downloads) {
+      final key = [
+        download.artist,
+        download.albumId ?? download.albumName ?? 'Downloads',
+      ].join('\u0000');
+      grouped.putIfAbsent(key, () => []).add(download);
+    }
+
+    final groups = <_DownloadAlbumGroup>[];
+    for (final entry in grouped.entries) {
+      final tracks = [...entry.value]
+        ..sort((left, right) {
+          final numberCompare = left.trackNumber.compareTo(right.trackNumber);
+          if (numberCompare != 0) {
+            return numberCompare;
+          }
+
+          return left.title.compareTo(right.title);
+        });
+      final first = tracks.first;
+      groups.add(
+        _DownloadAlbumGroup(
+          id: first.albumId ?? first.albumName ?? entry.key,
+          name: first.albumName ?? 'Downloads',
+          artist: first.artist,
+          coverUri: first.toTrack().coverArtUri,
+          tracks: tracks,
+        ),
+      );
+    }
+
+    groups.sort((left, right) {
+      final artistCompare = left.artist.compareTo(right.artist);
+      if (artistCompare != 0) {
+        return artistCompare;
+      }
+
+      return left.name.compareTo(right.name);
+    });
+    return groups;
+  }
+
+  Future<void> _openDownloadsFolder() async {
+    final directory = await _downloadRepository.downloadsDirectory();
+    if (!mounted) {
+      return;
+    }
+
+    try {
+      if (Platform.isMacOS) {
+        await Process.run('open', [directory.path]);
+      } else if (Platform.isWindows) {
+        await Process.run('explorer', [directory.path]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [directory.path]);
+      } else {
+        setState(() {
+          _exportMessage = 'Download folder: ${directory.path}';
+        });
+      }
+    } on Object catch (error) {
+      if (!mounted) {
+        return;
+      }
+
+      setState(() {
+        _exportMessage = 'Could not open download folder: $error';
+      });
+    }
   }
 
   Future<void> _exportDownloads(List<DownloadedTrack> downloads) async {
@@ -366,9 +464,51 @@ class _DownloadsPageState extends ConsumerState<DownloadsPage> {
           startIndex: startIndex,
         );
   }
+
+  Future<void> _playAlbumDownloads(List<DownloadedTrack> downloads) {
+    final firstCompleteIndex = downloads.indexWhere(
+      (download) => download.state == DownloadState.complete,
+    );
+    if (firstCompleteIndex < 0) {
+      return Future.value();
+    }
+
+    return _playDownload(downloads, firstCompleteIndex);
+  }
 }
 
 enum _ExportMode { update, clean }
+
+class _DownloadAlbumGroup {
+  const _DownloadAlbumGroup({
+    required this.id,
+    required this.name,
+    required this.artist,
+    required this.coverUri,
+    required this.tracks,
+  });
+
+  final String id;
+  final String name;
+  final String artist;
+  final Uri? coverUri;
+  final List<DownloadedTrack> tracks;
+
+  int get completeCount =>
+      tracks.where((track) => track.state == DownloadState.complete).length;
+  int get failedCount =>
+      tracks.where((track) => track.state == DownloadState.failed).length;
+  int get activeCount => tracks
+      .where(
+        (track) =>
+            track.state == DownloadState.queued ||
+            track.state == DownloadState.downloading,
+      )
+      .length;
+  int get totalBytes =>
+      tracks.fold(0, (total, track) => total + (track.bytes ?? 0));
+  bool get canPlay => completeCount > 0;
+}
 
 class _ExportBuilderData {
   const _ExportBuilderData({
@@ -770,18 +910,24 @@ class _ExportBuilderDialogState extends State<_ExportBuilderDialog> {
 class _DownloadsToolbar extends StatelessWidget {
   const _DownloadsToolbar({
     required this.onRepair,
+    required this.albumCount,
+    required this.totalBytes,
     required this.failedCount,
     required this.onRetryFailed,
     required this.isExporting,
     required this.onExport,
+    required this.onOpenFolder,
     this.repairMessage,
   });
 
   final VoidCallback onRepair;
+  final int albumCount;
+  final int totalBytes;
   final int failedCount;
   final VoidCallback onRetryFailed;
   final bool isExporting;
   final VoidCallback onExport;
+  final VoidCallback onOpenFolder;
   final String? repairMessage;
 
   @override
@@ -790,6 +936,27 @@ class _DownloadsToolbar extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        Row(
+          children: [
+            Expanded(
+              child: Wrap(
+                spacing: 12,
+                runSpacing: 6,
+                children: [
+                  _DownloadStat(
+                    icon: Icons.album_outlined,
+                    label: '$albumCount albums',
+                  ),
+                  _DownloadStat(
+                    icon: Icons.storage_outlined,
+                    label: _formatBytes(totalBytes),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
         if (repairMessage != null)
           Row(
             children: [
@@ -829,6 +996,11 @@ class _DownloadsToolbar extends StatelessWidget {
                       )
                     : const Icon(Icons.ios_share_outlined),
                 label: Text(isExporting ? 'Exporting...' : 'Export'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onOpenFolder,
+                icon: const Icon(Icons.folder_open_outlined),
+                label: const Text('Open folder'),
               ),
               OutlinedButton.icon(
                 onPressed: onRepair,
@@ -882,8 +1054,111 @@ String? _repairMessage(DownloadRepairResult? repairResult) {
       '${repairResult.clearedCoverCount} missing covers cleared',
     if (repairResult.recoveredCoverCount > 0)
       '${repairResult.recoveredCoverCount} local covers recovered',
+    if (repairResult.downloadedCoverCount > 0)
+      '${repairResult.downloadedCoverCount} covers downloaded',
   ];
   return 'Repaired ${parts.join(' • ')}.';
+}
+
+class _DownloadStat extends StatelessWidget {
+  const _DownloadStat({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 18, color: colorScheme.primary),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: colorScheme.onSurfaceVariant),
+        ),
+      ],
+    );
+  }
+}
+
+class _DownloadAlbumSection extends StatelessWidget {
+  const _DownloadAlbumSection({
+    required this.group,
+    required this.player,
+    required this.onPlayAlbum,
+    required this.onDeleteAlbum,
+    required this.buildTrackTile,
+  });
+
+  final _DownloadAlbumGroup group;
+  final PlayerController player;
+  final VoidCallback onPlayAlbum;
+  final VoidCallback onDeleteAlbum;
+  final Widget Function(DownloadedTrack download, int index) buildTrackTile;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isPlaying = player.isCurrentAlbum(group.id);
+    final status = [
+      '${group.completeCount}/${group.tracks.length} local',
+      if (group.activeCount > 0) '${group.activeCount} active',
+      if (group.failedCount > 0) '${group.failedCount} failed',
+      _formatBytes(group.totalBytes),
+    ].join(' • ');
+
+    return ExpansionTile(
+      key: PageStorageKey('downloads-album-${group.id}'),
+      tilePadding: const EdgeInsets.symmetric(horizontal: 4),
+      childrenPadding: EdgeInsets.zero,
+      leading: AlbumArt(
+        imageUri: group.coverUri,
+        size: 48,
+        semanticLabel: '${group.name} cover art',
+      ),
+      title: Text(
+        group.name,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: isPlaying
+            ? TextStyle(color: colorScheme.primary, fontWeight: FontWeight.w700)
+            : null,
+      ),
+      subtitle: Text(
+        '${group.artist} • $status',
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: isPlaying ? TextStyle(color: colorScheme.primary) : null,
+      ),
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          IconButton(
+            tooltip: 'Play downloaded album',
+            onPressed: group.canPlay ? onPlayAlbum : null,
+            icon: Icon(
+              isPlaying ? Icons.graphic_eq_outlined : Icons.play_arrow,
+              color: isPlaying ? colorScheme.primary : null,
+            ),
+          ),
+          IconButton(
+            tooltip: 'Delete local album',
+            onPressed: onDeleteAlbum,
+            icon: const Icon(Icons.delete_outline),
+          ),
+          const Icon(Icons.expand_more),
+        ],
+      ),
+      children: [
+        for (var index = 0; index < group.tracks.length; index += 1)
+          buildTrackTile(group.tracks[index], index),
+      ],
+    );
+  }
 }
 
 class _DownloadTile extends StatelessWidget {
@@ -1009,14 +1284,15 @@ class _DownloadTile extends StatelessWidget {
       ),
     );
   }
+}
 
-  static String _formatBytes(int bytes) {
-    return switch (bytes) {
-      < 1024 => '$bytes B',
-      < 1048576 => '${(bytes / 1024).toStringAsFixed(1)} KB',
-      _ => '${(bytes / 1048576).toStringAsFixed(1)} MB',
-    };
-  }
+String _formatBytes(int bytes) {
+  return switch (bytes) {
+    < 1024 => '$bytes B',
+    < 1048576 => '${(bytes / 1024).toStringAsFixed(1)} KB',
+    < 1073741824 => '${(bytes / 1048576).toStringAsFixed(1)} MB',
+    _ => '${(bytes / 1073741824).toStringAsFixed(1)} GB',
+  };
 }
 
 class _PlayingTileFrame extends StatelessWidget {
@@ -1045,7 +1321,7 @@ class _PlayingTileFrame extends StatelessWidget {
 Future<void> _confirmDeleteDownload(
   BuildContext context,
   DownloadedTrack download,
-  VoidCallback onConfirm,
+  Future<void> Function() onConfirm,
 ) async {
   final confirmed = await showDialog<bool>(
     context: context,
@@ -1071,7 +1347,40 @@ Future<void> _confirmDeleteDownload(
   );
 
   if (confirmed == true) {
-    onConfirm();
+    await onConfirm();
+  }
+}
+
+Future<void> _confirmDeleteAlbum(
+  BuildContext context,
+  _DownloadAlbumGroup group,
+  Future<void> Function() onConfirm,
+) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) {
+      return AlertDialog(
+        title: const Text('Delete local album?'),
+        content: Text(
+          'Remove "${group.name}" from this device. This removes ${group.tracks.length} local download records and files, but does not delete anything from Navidrome.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(context).pop(true),
+            icon: const Icon(Icons.delete_outline),
+            label: const Text('Delete album'),
+          ),
+        ],
+      );
+    },
+  );
+
+  if (confirmed == true) {
+    await onConfirm();
   }
 }
 

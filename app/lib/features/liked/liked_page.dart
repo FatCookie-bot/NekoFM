@@ -105,9 +105,16 @@ class _LikedPageState extends ConsumerState<LikedPage> {
                     onDownload: () => downloads.downloadTrack(track.toTrack()),
                     onDeleteDownload: download == null
                         ? null
-                        : () => _confirmDeleteDownload(context, download, () {
-                            downloads.deleteTrack(download.trackId);
-                          }),
+                        : () => _confirmDeleteDownload(
+                            context,
+                            download,
+                            () async {
+                              await downloads.deleteTrack(download.trackId);
+                              await player.removeDeletedLocalTracks([
+                                download.trackId,
+                              ]);
+                            },
+                          ),
                     onUnlike: () => liked.unlikeTrack(track.trackId),
                   );
                   if (!_isReordering) {
@@ -611,7 +618,7 @@ class _PlayingTileFrame extends StatelessWidget {
 Future<void> _confirmDeleteDownload(
   BuildContext context,
   DownloadedTrack download,
-  VoidCallback onConfirm,
+  Future<void> Function() onConfirm,
 ) async {
   final confirmed = await showDialog<bool>(
     context: context,
@@ -637,7 +644,7 @@ Future<void> _confirmDeleteDownload(
   );
 
   if (confirmed == true) {
-    onConfirm();
+    await onConfirm();
   }
 }
 
