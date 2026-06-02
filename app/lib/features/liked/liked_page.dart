@@ -54,31 +54,20 @@ class _LikedPageState extends ConsumerState<LikedPage> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Align(
-              alignment: Alignment.centerRight,
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  if (_isReordering) ...[
-                    TextButton.icon(
-                      onPressed: _cancelLikedReorder,
-                      icon: const Icon(Icons.close),
-                      label: const Text('Cancel'),
-                    ),
-                    FilledButton.icon(
-                      onPressed: () => _confirmLikedReorder(liked),
-                      icon: const Icon(Icons.check),
-                      label: const Text('Confirm order'),
-                    ),
-                  ] else
-                    OutlinedButton.icon(
-                      onPressed: () => _startLikedReorder(liked.tracks),
-                      icon: const Icon(Icons.swap_vert),
-                      label: const Text('Reorder'),
-                    ),
-                ],
-              ),
+            _LikedHeader(
+              tracks: visibleTracks,
+              isReordering: _isReordering,
+              isRepeatEnabled: player.isRepeatEnabled,
+              onPlay: () => _playFirstLiked(visibleTracks, downloads.tracks),
+              onShuffle: visibleTracks.length < 2
+                  ? null
+                  : () => _shuffleLiked(visibleTracks, downloads.tracks),
+              onToggleRepeat: player.toggleRepeat,
+              onStartReorder: liked.tracks.length < 2
+                  ? null
+                  : () => _startLikedReorder(liked.tracks),
+              onCancelReorder: _cancelLikedReorder,
+              onConfirmReorder: () => _confirmLikedReorder(liked),
             ),
             const SizedBox(height: 8),
             if (_isOffline && _hasCheckedConnection) ...[
@@ -284,6 +273,174 @@ class _LikedPageState extends ConsumerState<LikedPage> {
     return ref
         .read(playerControllerProvider)
         .playAlbum(album: album, tracks: tracks, startIndex: index);
+  }
+
+  Future<void> _playFirstLiked(
+    List<LikedTrack> likedTracks,
+    List<DownloadedTrack> downloads,
+  ) {
+    if (!_isOffline) {
+      return _playLiked(likedTracks, downloads, 0);
+    }
+
+    final downloadedIds = {
+      for (final download in downloads)
+        if (download.state == DownloadState.complete) download.trackId,
+    };
+    final firstPlayableIndex = likedTracks.indexWhere(
+      (track) => downloadedIds.contains(track.trackId),
+    );
+    if (firstPlayableIndex < 0) {
+      return Future.value();
+    }
+
+    return _playLiked(likedTracks, downloads, firstPlayableIndex);
+  }
+
+  Future<void> _shuffleLiked(
+    List<LikedTrack> likedTracks,
+    List<DownloadedTrack> downloads,
+  ) {
+    final shuffled = List<LikedTrack>.of(likedTracks)..shuffle();
+    if (!_isOffline) {
+      return _playLiked(shuffled, downloads, 0);
+    }
+
+    final downloadedIds = {
+      for (final download in downloads)
+        if (download.state == DownloadState.complete) download.trackId,
+    };
+    final playable = [
+      for (final track in shuffled)
+        if (downloadedIds.contains(track.trackId)) track,
+    ];
+    if (playable.isEmpty) {
+      return Future.value();
+    }
+
+    return _playLiked(playable, downloads, 0);
+  }
+}
+
+class _LikedHeader extends StatelessWidget {
+  const _LikedHeader({
+    required this.tracks,
+    required this.isReordering,
+    required this.isRepeatEnabled,
+    required this.onPlay,
+    required this.onToggleRepeat,
+    required this.onCancelReorder,
+    required this.onConfirmReorder,
+    this.onShuffle,
+    this.onStartReorder,
+  });
+
+  final List<LikedTrack> tracks;
+  final bool isReordering;
+  final bool isRepeatEnabled;
+  final VoidCallback onPlay;
+  final VoidCallback? onShuffle;
+  final VoidCallback onToggleRepeat;
+  final VoidCallback? onStartReorder;
+  final VoidCallback onCancelReorder;
+  final VoidCallback onConfirmReorder;
+
+  @override
+  Widget build(BuildContext context) {
+    final duration = Duration(
+      seconds: tracks.fold(0, (total, track) => total + track.durationSeconds),
+    );
+    final summary = [
+      '${tracks.length} ${tracks.length == 1 ? 'song' : 'songs'}',
+      if (tracks.isNotEmpty) formatPlaybackDuration(duration),
+    ].join(' • ');
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(8),
+                color: colorScheme.primaryContainer,
+              ),
+              child: Icon(
+                Icons.favorite,
+                color: colorScheme.onPrimaryContainer,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Liked',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    summary,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (isReordering) ...[
+              TextButton.icon(
+                onPressed: onCancelReorder,
+                icon: const Icon(Icons.close),
+                label: const Text('Cancel'),
+              ),
+              FilledButton.icon(
+                onPressed: onConfirmReorder,
+                icon: const Icon(Icons.check),
+                label: const Text('Confirm order'),
+              ),
+            ] else ...[
+              FilledButton.icon(
+                onPressed: tracks.isEmpty ? null : onPlay,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Play'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onShuffle,
+                icon: const Icon(Icons.shuffle),
+                label: const Text('Shuffle'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onToggleRepeat,
+                icon: Icon(isRepeatEnabled ? Icons.repeat_on : Icons.repeat),
+                label: Text(isRepeatEnabled ? 'Repeat on' : 'Repeat'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onStartReorder,
+                icon: const Icon(Icons.swap_vert),
+                label: const Text('Reorder'),
+              ),
+            ],
+          ],
+        ),
+      ],
+    );
   }
 }
 

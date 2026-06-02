@@ -49,10 +49,12 @@ class PlayerController extends ChangeNotifier {
 
   List<Track> _queue = const [];
   List<String> _queueKeys = const [];
+  List<String> _baseQueueKeys = const [];
   List<PlaybackSource> _queueSources = const [];
   Album? _album;
   String? _errorMessage;
   bool _isLoading = false;
+  bool _isShuffleEnabled = false;
 
   List<Track> get queue => _queue;
   Album? get album => _album;
@@ -60,6 +62,7 @@ class PlayerController extends ChangeNotifier {
   bool get isLoading => _isLoading;
   bool get hasQueue => _queue.isNotEmpty;
   bool get isRepeatEnabled => audioPlayer.loopMode == LoopMode.all;
+  bool get isShuffleEnabled => _isShuffleEnabled;
   Track? get currentTrack => trackAt(audioPlayer.currentIndex);
   Album? get currentAlbum => _album;
 
@@ -115,6 +118,8 @@ class PlayerController extends ChangeNotifier {
     _album = album;
     _queue = List.unmodifiable(tracks);
     _queueKeys = List.unmodifiable(resolvedQueueKeys);
+    _baseQueueKeys = List.unmodifiable(resolvedQueueKeys);
+    _isShuffleEnabled = false;
     notifyListeners();
 
     try {
@@ -184,6 +189,8 @@ class PlayerController extends ChangeNotifier {
     _album = album;
     _queue = List.unmodifiable(tracks);
     _queueKeys = List.unmodifiable([for (final track in tracks) track.id]);
+    _baseQueueKeys = _queueKeys;
+    _isShuffleEnabled = false;
     _queueSources = List.filled(tracks.length, PlaybackSource.local);
     notifyListeners();
 
@@ -253,10 +260,83 @@ class PlayerController extends ChangeNotifier {
     );
   }
 
+  Future<void> toggleShuffle() async {
+    if (_queue.length < 2 || _album == null) {
+      return;
+    }
+
+    if (_isShuffleEnabled) {
+      await _restoreUpcomingQueueOrder();
+      _isShuffleEnabled = false;
+      notifyListeners();
+      return;
+    }
+
+    await _shuffleUpcomingQueue();
+    _isShuffleEnabled = true;
+    notifyListeners();
+  }
+
+  Future<void> _shuffleUpcomingQueue() async {
+    final currentIndex = audioPlayer.currentIndex;
+    final safeCurrentIndex = currentIndex == null
+        ? 0
+        : currentIndex.clamp(0, _queue.length - 1).toInt();
+    final remainingIndices = [
+      for (var index = 0; index < _queue.length; index += 1)
+        if (index != safeCurrentIndex) index,
+    ]..shuffle();
+    final orderedIndices = [safeCurrentIndex, ...remainingIndices];
+
+    await reorderCurrentQueue(
+      albumId: _album!.id,
+      tracks: [for (final index in orderedIndices) _queue[index]],
+      queueKeys: [for (final index in orderedIndices) _queueKeys[index]],
+      updateBaseOrder: false,
+    );
+  }
+
+  Future<void> _restoreUpcomingQueueOrder() async {
+    final currentKey = queueKeyAt(audioPlayer.currentIndex);
+    if (currentKey == null || _baseQueueKeys.isEmpty || _album == null) {
+      return;
+    }
+
+    final nextKeys = [
+      currentKey,
+      for (final key in _baseQueueKeys)
+        if (key != currentKey && _queueKeys.contains(key)) key,
+    ];
+    await _reorderQueueByKeys(nextKeys, updateBaseOrder: false);
+  }
+
+  Future<void> _reorderQueueByKeys(
+    List<String> orderedKeys, {
+    bool updateBaseOrder = true,
+  }) {
+    final tracksByKey = {
+      for (var index = 0; index < _queue.length; index += 1)
+        _queueKeys[index]: _queue[index],
+    };
+    return reorderCurrentQueue(
+      albumId: _album!.id,
+      tracks: [
+        for (final key in orderedKeys)
+          if (tracksByKey[key] != null) tracksByKey[key]!,
+      ],
+      queueKeys: [
+        for (final key in orderedKeys)
+          if (tracksByKey[key] != null) key,
+      ],
+      updateBaseOrder: updateBaseOrder,
+    );
+  }
+
   Future<void> reorderCurrentQueue({
     required String albumId,
     required List<Track> tracks,
     List<String>? queueKeys,
+    bool updateBaseOrder = true,
   }) async {
     if (_album?.id != albumId || tracks.length != _queue.length) {
       return;
@@ -297,6 +377,10 @@ class PlayerController extends ChangeNotifier {
 
     _queue = List.unmodifiable(workingTracks);
     _queueKeys = List.unmodifiable(workingKeys);
+    if (updateBaseOrder) {
+      _baseQueueKeys = List.unmodifiable(workingKeys);
+      _isShuffleEnabled = false;
+    }
     _queueSources = List.unmodifiable(workingSources);
     notifyListeners();
   }

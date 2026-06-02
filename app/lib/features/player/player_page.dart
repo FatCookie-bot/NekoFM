@@ -340,6 +340,28 @@ class _PlaybackControls extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             IconButton.filledTonal(
+              tooltip: controller.isRepeatEnabled
+                  ? 'Turn repeat off'
+                  : 'Repeat queue',
+              onPressed: controller.toggleRepeat,
+              icon: Icon(
+                controller.isRepeatEnabled ? Icons.repeat_on : Icons.repeat,
+              ),
+            ),
+            const SizedBox(width: 12),
+            IconButton.filledTonal(
+              tooltip: controller.isShuffleEnabled
+                  ? 'Turn shuffle off'
+                  : 'Shuffle upcoming queue',
+              onPressed: controller.queue.length < 2
+                  ? null
+                  : controller.toggleShuffle,
+              icon: Icon(
+                controller.isShuffleEnabled ? Icons.shuffle_on : Icons.shuffle,
+              ),
+            ),
+            const SizedBox(width: 12),
+            IconButton.filledTonal(
               tooltip: 'Restart or previous track',
               onPressed: controller.seekBack,
               icon: const Icon(Icons.skip_previous),
@@ -382,13 +404,29 @@ class _QueueList extends StatelessWidget {
       stream: controller.audioPlayer.currentIndexStream,
       initialData: controller.audioPlayer.currentIndex,
       builder: (context, snapshot) {
-        final currentIndex = snapshot.data ?? 0;
+        final currentIndex = (snapshot.data ?? 0).clamp(
+          0,
+          controller.queue.length - 1,
+        );
+        final visibleQueueIndexes = _visibleQueueIndexes(
+          currentIndex: currentIndex,
+          queueLength: controller.queue.length,
+          shouldWrap: controller.isRepeatEnabled,
+        );
         return ListView.separated(
-          itemCount: controller.queue.length,
-          separatorBuilder: (_, _) => const Divider(height: 1),
+          itemCount: visibleQueueIndexes.length + 1,
+          separatorBuilder: (context, index) =>
+              index == 0 ? const SizedBox(height: 8) : const Divider(height: 1),
           itemBuilder: (context, index) {
-            final track = controller.queue[index];
-            final isCurrent = index == currentIndex;
+            if (index == 0) {
+              return _QueueHeader(name: controller.album?.name ?? 'Queue');
+            }
+
+            final visibleIndex = index - 1;
+            final queueIndex = visibleQueueIndexes[visibleIndex];
+            final track = controller.queue[queueIndex];
+            final source = controller.sourceAt(queueIndex);
+            final isCurrent = visibleIndex == 0;
             return _PlayingTileFrame(
               isPlaying: isCurrent,
               child: ListTile(
@@ -404,17 +442,81 @@ class _QueueList extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
                 subtitle: Text(
-                  '${track.artist} • ${formatPlaybackDuration(Duration(seconds: track.durationSeconds))}',
+                  [
+                    isCurrent ? 'Now playing' : 'Next',
+                    track.artist,
+                    formatPlaybackDuration(
+                      Duration(seconds: track.durationSeconds),
+                    ),
+                    if (source != null) source.label,
+                  ].join(' • '),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                onTap: () =>
-                    controller.audioPlayer.seek(Duration.zero, index: index),
+                onTap: () => controller.audioPlayer.seek(
+                  Duration.zero,
+                  index: queueIndex,
+                ),
               ),
             );
           },
         );
       },
+    );
+  }
+
+  List<int> _visibleQueueIndexes({
+    required int currentIndex,
+    required int queueLength,
+    required bool shouldWrap,
+  }) {
+    if (queueLength <= 0) {
+      return const [];
+    }
+
+    final visibleCount = shouldWrap
+        ? 10
+        : (queueLength - currentIndex).clamp(0, 10).toInt();
+    return [
+      for (var offset = 0; offset < visibleCount; offset += 1)
+        shouldWrap
+            ? (currentIndex + offset) % queueLength
+            : currentIndex + offset,
+    ];
+  }
+}
+
+class _QueueHeader extends StatelessWidget {
+  const _QueueHeader({required this.name});
+
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Queue', style: Theme.of(context).textTheme.titleMedium),
+                const SizedBox(height: 2),
+                Text(
+                  name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
