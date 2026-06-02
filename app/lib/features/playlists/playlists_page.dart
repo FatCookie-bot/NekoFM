@@ -61,6 +61,10 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
               _reorderDraft = const [];
             }),
             onPlay: (index) => _playPlaylist(selected, index),
+            onPlayAll: () => _playPlaylist(selected, 0),
+            onShuffle: () => _shufflePlaylist(selected),
+            onToggleRepeat: player.toggleRepeat,
+            onRename: () => _renamePlaylist(selected),
             onDelete: () => _confirmDeletePlaylist(selected),
             onToggleLiked: (track) => liked.toggleTrack(track.toTrack()),
             onRemoveTrack: (track) =>
@@ -94,28 +98,36 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
                       separatorBuilder: (_, _) => const Divider(height: 1),
                       itemBuilder: (context, index) {
                         final playlist = playlists.playlists[index];
-                        return ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 4,
-                            vertical: 6,
+                        final isPlaying = player.isCurrentAlbum(playlist.id);
+                        return _PlayingTileFrame(
+                          isPlaying: isPlaying,
+                          child: ListTile(
+                            contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 6,
+                            ),
+                            leading: const Icon(Icons.queue_music_outlined),
+                            title: Text(
+                              playlist.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text('${playlist.trackCount} tracks'),
+                            trailing: Icon(
+                              isPlaying
+                                  ? Icons.graphic_eq_outlined
+                                  : Icons.chevron_right,
+                            ),
+                            onTap: () async {
+                              await playlists.loadTracks(playlist.id);
+                              if (!mounted) {
+                                return;
+                              }
+                              setState(() {
+                                _selectedPlaylist = playlist;
+                              });
+                            },
                           ),
-                          leading: const Icon(Icons.queue_music_outlined),
-                          title: Text(
-                            playlist.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text('${playlist.trackCount} tracks'),
-                          trailing: const Icon(Icons.chevron_right),
-                          onTap: () async {
-                            await playlists.loadTracks(playlist.id);
-                            if (!mounted) {
-                              return;
-                            }
-                            setState(() {
-                              _selectedPlaylist = playlist;
-                            });
-                          },
                         );
                       },
                     ),
@@ -170,6 +182,29 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
     });
   }
 
+  Future<void> _renamePlaylist(Playlist playlist) async {
+    final name = await _promptForPlaylistName(
+      context,
+      title: 'Rename playlist',
+      initialName: playlist.name,
+      confirmLabel: 'Rename',
+    );
+    if (name == null || name.trim().isEmpty) {
+      return;
+    }
+
+    final renamed = await ref
+        .read(playlistControllerProvider)
+        .renamePlaylist(playlist.id, name);
+    if (!mounted || renamed == null) {
+      return;
+    }
+
+    setState(() {
+      _selectedPlaylist = renamed;
+    });
+  }
+
   Future<void> _playPlaylist(Playlist playlist, int index) {
     final tracks = _isReordering
         ? _reorderDraft
@@ -193,7 +228,37 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
             coverArtUri: tracks.first.toTrack().coverArtUri,
           ),
           tracks: [for (final track in tracks) track.toTrack()],
+          queueKeys: [for (final track in tracks) track.entryId],
           startIndex: index,
+        );
+  }
+
+  Future<void> _shufflePlaylist(Playlist playlist) {
+    final tracks = (_isReordering
+        ? _reorderDraft
+        : ref.read(playlistControllerProvider).tracksFor(playlist.id));
+    if (tracks.isEmpty) {
+      return Future.value();
+    }
+
+    final shuffled = List<PlaylistTrack>.of(tracks)..shuffle();
+    return ref
+        .read(playerControllerProvider)
+        .playAlbum(
+          album: Album(
+            id: playlist.id,
+            name: playlist.name,
+            artist: 'Playlist',
+            songCount: shuffled.length,
+            durationSeconds: shuffled.fold(
+              0,
+              (total, track) => total + track.durationSeconds,
+            ),
+            coverArtUri: shuffled.first.toTrack().coverArtUri,
+          ),
+          tracks: [for (final track in shuffled) track.toTrack()],
+          queueKeys: [for (final track in shuffled) track.entryId],
+          startIndex: 0,
         );
   }
 
@@ -223,6 +288,7 @@ class _PlaylistsPageState extends ConsumerState<PlaylistsPage> {
         .reorderCurrentQueue(
           albumId: playlist.id,
           tracks: [for (final track in orderedTracks) track.toTrack()],
+          queueKeys: [for (final track in orderedTracks) track.entryId],
         );
     if (!mounted) {
       return;
@@ -271,6 +337,10 @@ class _PlaylistDetailView extends StatelessWidget {
     required this.selectedReorderIndex,
     required this.onBack,
     required this.onPlay,
+    required this.onPlayAll,
+    required this.onShuffle,
+    required this.onToggleRepeat,
+    required this.onRename,
     required this.onDelete,
     required this.onToggleLiked,
     required this.onRemoveTrack,
@@ -289,6 +359,10 @@ class _PlaylistDetailView extends StatelessWidget {
   final int? selectedReorderIndex;
   final VoidCallback onBack;
   final ValueChanged<int> onPlay;
+  final VoidCallback onPlayAll;
+  final VoidCallback onShuffle;
+  final VoidCallback onToggleRepeat;
+  final VoidCallback onRename;
   final VoidCallback onDelete;
   final ValueChanged<PlaylistTrack> onToggleLiked;
   final ValueChanged<PlaylistTrack> onRemoveTrack;
@@ -300,6 +374,14 @@ class _PlaylistDetailView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final duration = Duration(
+      seconds: tracks.fold(0, (total, track) => total + track.durationSeconds),
+    );
+    final summary = [
+      '${tracks.length} ${tracks.length == 1 ? 'song' : 'songs'}',
+      if (tracks.isNotEmpty) formatPlaybackDuration(duration),
+    ].join(' • ');
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -320,37 +402,68 @@ class _PlaylistDetailView extends StatelessWidget {
               ),
             ),
             IconButton(
+              tooltip: 'Rename playlist',
+              onPressed: isReordering ? null : onRename,
+              icon: const Icon(Icons.edit_outlined),
+            ),
+            IconButton(
               tooltip: 'Delete playlist',
               onPressed: isReordering ? null : onDelete,
               icon: const Icon(Icons.delete_outline),
             ),
           ],
         ),
-        Align(
-          alignment: Alignment.centerRight,
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              if (isReordering) ...[
-                TextButton.icon(
-                  onPressed: onCancelReorder,
-                  icon: const Icon(Icons.close),
-                  label: const Text('Cancel'),
-                ),
-                FilledButton.icon(
-                  onPressed: onConfirmReorder,
-                  icon: const Icon(Icons.check),
-                  label: const Text('Confirm order'),
-                ),
-              ] else
-                OutlinedButton.icon(
-                  onPressed: tracks.length < 2 ? null : onStartReorder,
-                  icon: const Icon(Icons.swap_vert),
-                  label: const Text('Reorder'),
-                ),
-            ],
+        const SizedBox(height: 4),
+        Padding(
+          padding: const EdgeInsets.only(left: 52),
+          child: Text(
+            summary,
+            style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
           ),
+        ),
+        const SizedBox(height: 12),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            if (isReordering) ...[
+              TextButton.icon(
+                onPressed: onCancelReorder,
+                icon: const Icon(Icons.close),
+                label: const Text('Cancel'),
+              ),
+              FilledButton.icon(
+                onPressed: onConfirmReorder,
+                icon: const Icon(Icons.check),
+                label: const Text('Confirm order'),
+              ),
+            ] else ...[
+              FilledButton.icon(
+                onPressed: tracks.isEmpty ? null : onPlayAll,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Play'),
+              ),
+              OutlinedButton.icon(
+                onPressed: tracks.length < 2 ? null : onShuffle,
+                icon: const Icon(Icons.shuffle),
+                label: const Text('Shuffle'),
+              ),
+              OutlinedButton.icon(
+                onPressed: onToggleRepeat,
+                icon: Icon(
+                  player.isRepeatEnabled ? Icons.repeat_on : Icons.repeat,
+                ),
+                label: Text(player.isRepeatEnabled ? 'Repeat on' : 'Repeat'),
+              ),
+              OutlinedButton.icon(
+                onPressed: tracks.length < 2 ? null : onStartReorder,
+                icon: const Icon(Icons.swap_vert),
+                label: const Text('Reorder'),
+              ),
+            ],
+          ],
         ),
         const SizedBox(height: 12),
         Expanded(
@@ -365,7 +478,8 @@ class _PlaylistDetailView extends StatelessWidget {
                     final tile = _PlayingTileFrame(
                       key: ValueKey(track.entryId),
                       isPlaying:
-                          !isReordering && player.isCurrentTrack(track.trackId),
+                          !isReordering &&
+                          player.isCurrentQueueKey(track.entryId),
                       isSelected: selectedReorderIndex == index,
                       child: ListTile(
                         contentPadding: const EdgeInsets.symmetric(
@@ -419,7 +533,7 @@ class _PlaylistDetailView extends StatelessWidget {
                                 icon: const Icon(Icons.remove_circle_outline),
                               ),
                               Icon(
-                                player.isCurrentTrack(track.trackId)
+                                player.isCurrentQueueKey(track.entryId)
                                     ? Icons.graphic_eq_outlined
                                     : Icons.play_arrow_outlined,
                               ),
@@ -496,14 +610,25 @@ class _PlayingTileFrame extends StatelessWidget {
   }
 }
 
-Future<String?> _promptForPlaylistName(BuildContext context) async {
-  final controller = TextEditingController();
+Future<String?> _promptForPlaylistName(
+  BuildContext context, {
+  String title = 'New playlist',
+  String initialName = '',
+  String confirmLabel = 'Create',
+}) async {
+  final controller = TextEditingController(text: initialName);
   try {
+    if (initialName.isNotEmpty) {
+      controller.selection = TextSelection(
+        baseOffset: 0,
+        extentOffset: initialName.length,
+      );
+    }
     return showDialog<String>(
       context: context,
       builder: (context) {
         return AlertDialog(
-          title: const Text('New playlist'),
+          title: Text(title),
           content: TextField(
             controller: controller,
             autofocus: true,
@@ -521,7 +646,7 @@ Future<String?> _promptForPlaylistName(BuildContext context) async {
             ),
             FilledButton(
               onPressed: () => Navigator.of(context).pop(controller.text),
-              child: const Text('Create'),
+              child: Text(confirmLabel),
             ),
           ],
         );

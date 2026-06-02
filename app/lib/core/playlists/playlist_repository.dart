@@ -34,6 +34,10 @@ class PlaylistRepository {
     return _database.deletePlaylist(playlistId);
   }
 
+  Future<void> renamePlaylist(String playlistId, String name) {
+    return _database.renamePlaylist(playlistId, name.trim());
+  }
+
   Future<void> addTrack(String playlistId, Track track) async {
     final nextPosition = await _database.nextPlaylistPosition(playlistId);
     await _database.upsertPlaylistTrack(

@@ -34,6 +34,9 @@ class PlayerController extends ChangeNotifier {
     _currentIndexSubscription = this.audioPlayer.currentIndexStream.listen((_) {
       notifyListeners();
     });
+    _loopModeSubscription = this.audioPlayer.loopModeStream.listen((_) {
+      notifyListeners();
+    });
   }
 
   final AudioPlayer audioPlayer;
@@ -42,8 +45,10 @@ class PlayerController extends ChangeNotifier {
   final DownloadRepository _downloadRepository;
   final PlaybackPreferences _playbackPreferences;
   late final StreamSubscription<int?> _currentIndexSubscription;
+  late final StreamSubscription<LoopMode> _loopModeSubscription;
 
   List<Track> _queue = const [];
+  List<String> _queueKeys = const [];
   List<PlaybackSource> _queueSources = const [];
   Album? _album;
   String? _errorMessage;
@@ -54,10 +59,13 @@ class PlayerController extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   bool get isLoading => _isLoading;
   bool get hasQueue => _queue.isNotEmpty;
+  bool get isRepeatEnabled => audioPlayer.loopMode == LoopMode.all;
   Track? get currentTrack => trackAt(audioPlayer.currentIndex);
   Album? get currentAlbum => _album;
 
   bool isCurrentTrack(String trackId) => currentTrack?.id == trackId;
+  bool isCurrentQueueKey(String key) =>
+      queueKeyAt(audioPlayer.currentIndex) == key;
   bool isCurrentAlbum(String albumId) {
     return currentAlbum?.id == albumId || currentTrack?.albumId == albumId;
   }
@@ -78,12 +86,27 @@ class PlayerController extends ChangeNotifier {
     return _queueSources[index];
   }
 
+  String? queueKeyAt(int? index) {
+    if (index == null || index < 0 || index >= _queueKeys.length) {
+      return null;
+    }
+
+    return _queueKeys[index];
+  }
+
   Future<void> playAlbum({
     required Album album,
     required List<Track> tracks,
     required int startIndex,
+    List<String>? queueKeys,
   }) async {
     if (tracks.isEmpty) {
+      return;
+    }
+
+    final resolvedQueueKeys =
+        queueKeys ?? [for (final track in tracks) track.id];
+    if (resolvedQueueKeys.length != tracks.length) {
       return;
     }
 
@@ -91,6 +114,7 @@ class PlayerController extends ChangeNotifier {
     _errorMessage = null;
     _album = album;
     _queue = List.unmodifiable(tracks);
+    _queueKeys = List.unmodifiable(resolvedQueueKeys);
     notifyListeners();
 
     try {
@@ -159,6 +183,7 @@ class PlayerController extends ChangeNotifier {
     _errorMessage = null;
     _album = album;
     _queue = List.unmodifiable(tracks);
+    _queueKeys = List.unmodifiable([for (final track in tracks) track.id]);
     _queueSources = List.filled(tracks.length, PlaybackSource.local);
     notifyListeners();
 
@@ -222,21 +247,34 @@ class PlayerController extends ChangeNotifier {
     return audioPlayer.seekToNext();
   }
 
+  Future<void> toggleRepeat() {
+    return audioPlayer.setLoopMode(
+      isRepeatEnabled ? LoopMode.off : LoopMode.all,
+    );
+  }
+
   Future<void> reorderCurrentQueue({
     required String albumId,
     required List<Track> tracks,
+    List<String>? queueKeys,
   }) async {
     if (_album?.id != albumId || tracks.length != _queue.length) {
       return;
     }
+    final resolvedQueueKeys =
+        queueKeys ?? [for (final track in tracks) track.id];
+    if (resolvedQueueKeys.length != tracks.length) {
+      return;
+    }
 
     final workingTracks = _queue.toList();
+    final workingKeys = _queueKeys.toList();
     final workingSources = _queueSources.toList();
     for (var targetIndex = 0; targetIndex < tracks.length; targetIndex += 1) {
-      final targetTrackId = tracks[targetIndex].id;
+      final targetKey = resolvedQueueKeys[targetIndex];
       var sourceIndex = -1;
-      for (var index = targetIndex; index < workingTracks.length; index += 1) {
-        if (workingTracks[index].id == targetTrackId) {
+      for (var index = targetIndex; index < workingKeys.length; index += 1) {
+        if (workingKeys[index] == targetKey) {
           sourceIndex = index;
           break;
         }
@@ -251,11 +289,14 @@ class PlayerController extends ChangeNotifier {
       await audioPlayer.moveAudioSource(sourceIndex, targetIndex);
       final movedTrack = workingTracks.removeAt(sourceIndex);
       workingTracks.insert(targetIndex, movedTrack);
+      final movedKey = workingKeys.removeAt(sourceIndex);
+      workingKeys.insert(targetIndex, movedKey);
       final movedSource = workingSources.removeAt(sourceIndex);
       workingSources.insert(targetIndex, movedSource);
     }
 
     _queue = List.unmodifiable(workingTracks);
+    _queueKeys = List.unmodifiable(workingKeys);
     _queueSources = List.unmodifiable(workingSources);
     notifyListeners();
   }
@@ -320,6 +361,7 @@ class PlayerController extends ChangeNotifier {
   @override
   Future<void> dispose() async {
     await _currentIndexSubscription.cancel();
+    await _loopModeSubscription.cancel();
     await audioPlayer.dispose();
     super.dispose();
   }

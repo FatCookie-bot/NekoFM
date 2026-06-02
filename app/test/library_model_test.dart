@@ -1103,6 +1103,12 @@ void main() {
     expect(reorderedTracks.first.position, 0);
     expect(reorderedTracks.last.position, 1);
 
+    await repository.renamePlaylist(playlist.id, 'Night Drive');
+    final renamedPlaylists = await repository.loadPlaylists();
+    expect(renamedPlaylists.single.name, 'Night Drive');
+    expect(renamedPlaylists.single.trackCount, 2);
+    expect(await repository.loadTracks(playlist.id), hasLength(2));
+
     await repository.removeEntry(playlist.id, tracks.first.entryId);
     expect(await repository.loadTracks(playlist.id), hasLength(1));
 

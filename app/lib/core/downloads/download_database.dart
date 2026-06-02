@@ -214,6 +214,18 @@ class DownloadDatabase {
       ''', _playlistArguments(playlist));
   }
 
+  Future<void> renamePlaylist(String playlistId, String name) async {
+    final db = await _open();
+    db.execute(
+      '''
+      UPDATE playlists
+      SET name = ?, updated_at = ?
+      WHERE id = ?
+      ''',
+      [name.trim(), DateTime.now().toIso8601String(), playlistId],
+    );
+  }
+
   Future<void> deletePlaylist(String playlistId) async {
     final db = await _open();
     db.execute('DELETE FROM playlists WHERE id = ?', [playlistId]);

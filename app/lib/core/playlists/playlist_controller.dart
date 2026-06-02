@@ -54,6 +54,22 @@ class PlaylistController extends ChangeNotifier {
     await load();
   }
 
+  Future<Playlist?> renamePlaylist(String playlistId, String name) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty) {
+      return null;
+    }
+
+    await _repository.renamePlaylist(playlistId, trimmed);
+    await load();
+    for (final playlist in _playlists) {
+      if (playlist.id == playlistId) {
+        return playlist;
+      }
+    }
+    return null;
+  }
+
   Future<void> addTrack(String playlistId, Track track) async {
     await _repository.addTrack(playlistId, track);
     await load();
