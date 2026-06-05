@@ -25,6 +25,12 @@ music-host/music/
 build/
 coverage/
 
+# React/Tauri
+node_modules/
+dist/
+**/src-tauri/target/
+**/src-tauri/gen/
+
 # Generated platform artifacts and dependency caches
 **/Pods/
 **/.symlinks/

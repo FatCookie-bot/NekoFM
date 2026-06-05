@@ -54,7 +54,7 @@ When the user is satisfied with the current point and says to move on to the nex
 Before pushing:
 
 1. Check `.gitignore` so sensitive/local files are still excluded.
-2. Run relevant verification, usually `flutter analyze` and `flutter test` for app changes.
+2. Run relevant verification, usually `npm run build`, `cargo test`, and `cargo check` for app changes.
 3. Commit the current stable point with a clear message.
 4. Push the branch to GitHub.
 

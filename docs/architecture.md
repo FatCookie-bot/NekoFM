@@ -1,6 +1,6 @@
 # NekoFM Architecture
 
-NekoFM is a Flutter client with a local database, a playback layer, a transfer layer, and a provider abstraction for music servers.
+NekoFM is a React/Tauri desktop client with a local database, a playback layer, a transfer layer, and a provider abstraction for music servers.
 
 ## Main Boundary
 
@@ -10,8 +10,8 @@ The UI must not call the server API or playback backend directly.
 
 ```text
 UI
-  -> controllers / use cases
-  -> repositories
+  -> React state/actions
+  -> Tauri commands
   -> provider, database, storage, playback backend
 ```
 
@@ -46,19 +46,18 @@ Playback should go through a controller and backend abstraction.
 
 ```text
 UI
-  -> PlaybackController
-  -> AudioBackend
-  -> JustAudioBackend
+  -> Player state/actions
+  -> browser audio element / Tauri-native helpers where needed
 ```
 
 The source resolver chooses a local verified file first, then a server stream when the server is reachable.
 
 ## Local Database
 
-Use SQLite through Drift for metadata, server profiles, playable sources, transfer jobs, and export state.
+Use SQLite through the Tauri backend for metadata, server profiles, playable sources, transfer jobs, and export state.
 
 The library UI should read from repositories that can serve local cached data and refresh from the server.
 
 ## UI Experiments
 
-Playback, downloads, sync, and export logic should stay outside widgets. This allows the visual design, navigation, and experimental controls to change without breaking core behavior.
+Playback, downloads, sync, and export logic should stay outside fragile component-only code where possible. This allows the visual design, navigation, and experimental controls to change without breaking core behavior.
