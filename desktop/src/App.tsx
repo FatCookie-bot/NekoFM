@@ -4917,7 +4917,6 @@ function DownloadsPage({
   }
 
   async function exportSelectedMusic() {
-    setIsExporting(true);
     setExportMessage(null);
     setExportWarning(null);
     try {
@@ -4930,6 +4929,7 @@ function DownloadsPage({
       if (!targetFolder) {
         return;
       }
+      setIsExporting(true);
       let cleanFirst = false;
       const hasExisting = await invokeCommand<boolean>("has_existing_export", {
         targetFolder,

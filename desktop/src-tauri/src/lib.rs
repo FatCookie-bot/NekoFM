@@ -309,9 +309,7 @@ async fn test_server_connection(
 }
 
 #[tauri::command]
-fn load_server_profile(
-    app: tauri::AppHandle,
-) -> Result<Option<SavedServerProfileOutput>, String> {
+fn load_server_profile(app: tauri::AppHandle) -> Result<Option<SavedServerProfileOutput>, String> {
     let metadata = match load_profile_metadata(&app)? {
         Some(metadata) => metadata,
         None => return Ok(None),
@@ -319,10 +317,15 @@ fn load_server_profile(
 
     let password = if metadata.remember_password {
         let loaded = load_password(&app).map_err(|error| {
-            format!("Saved profile exists, but the password could not be loaded from Keychain: {error}")
+            format!(
+                "Saved profile exists, but the password could not be loaded from Keychain: {error}"
+            )
         })?;
         if loaded.is_empty() {
-            return Err("Saved profile exists, but the saved password is empty. Reconnect in Settings.".to_string());
+            return Err(
+                "Saved profile exists, but the saved password is empty. Reconnect in Settings."
+                    .to_string(),
+            );
         }
         loaded
     } else {
@@ -397,7 +400,10 @@ async fn get_album(app: tauri::AppHandle, album_id: String) -> Result<AlbumDetai
 }
 
 #[tauri::command]
-async fn search_library(app: tauri::AppHandle, query: String) -> Result<LibrarySearchResultOutput, String> {
+async fn search_library(
+    app: tauri::AppHandle,
+    query: String,
+) -> Result<LibrarySearchResultOutput, String> {
     if query.trim().len() < 2 {
         return Ok(LibrarySearchResultOutput {
             albums: Vec::new(),
@@ -417,11 +423,17 @@ async fn search_library(app: tauri::AppHandle, query: String) -> Result<LibraryS
         ],
     )
     .await?;
-    Ok(search_result_from_subsonic(&profile, response.data.get("searchResult3")))
+    Ok(search_result_from_subsonic(
+        &profile,
+        response.data.get("searchResult3"),
+    ))
 }
 
 #[tauri::command]
-fn search_downloaded_library(app: tauri::AppHandle, query: String) -> Result<LibrarySearchResultOutput, String> {
+fn search_downloaded_library(
+    app: tauri::AppHandle,
+    query: String,
+) -> Result<LibrarySearchResultOutput, String> {
     search_downloaded_details(&app, &query)
 }
 
@@ -460,11 +472,15 @@ async fn start_scan_for_profile(profile: &SavedServerProfile) -> Result<ServerSc
 #[tauri::command]
 fn get_stream_uri(app: tauri::AppHandle, track_id: String) -> Result<String, String> {
     let profile = require_saved_profile(&app)?;
-    stream_uri(&profile, &track_id).ok_or_else(|| "Track stream URL could not be created.".to_string())
+    stream_uri(&profile, &track_id)
+        .ok_or_else(|| "Track stream URL could not be created.".to_string())
 }
 
 #[tauri::command]
-fn get_playback_source(app: tauri::AppHandle, track_id: String) -> Result<PlaybackSourceOutput, String> {
+fn get_playback_source(
+    app: tauri::AppHandle,
+    track_id: String,
+) -> Result<PlaybackSourceOutput, String> {
     if let Some(download) = complete_download_for_track(&app, &track_id)? {
         let path = PathBuf::from(&download.local_path);
         return Ok(PlaybackSourceOutput {
@@ -612,7 +628,10 @@ fn rename_playlist(
     }
 
     let mut store = load_playlist_store(&app)?;
-    let Some(playlist) = store.playlists.iter_mut().find(|playlist| playlist.id == playlist_id)
+    let Some(playlist) = store
+        .playlists
+        .iter_mut()
+        .find(|playlist| playlist.id == playlist_id)
     else {
         return Err("Playlist was not found.".to_string());
     };
@@ -623,10 +642,17 @@ fn rename_playlist(
 }
 
 #[tauri::command]
-fn delete_playlist(app: tauri::AppHandle, playlist_id: String) -> Result<Vec<PlaylistOutput>, String> {
+fn delete_playlist(
+    app: tauri::AppHandle,
+    playlist_id: String,
+) -> Result<Vec<PlaylistOutput>, String> {
     let mut store = load_playlist_store(&app)?;
-    store.playlists.retain(|playlist| playlist.id != playlist_id);
-    store.tracks.retain(|track| track.playlist_id != playlist_id);
+    store
+        .playlists
+        .retain(|playlist| playlist.id != playlist_id);
+    store
+        .tracks
+        .retain(|track| track.playlist_id != playlist_id);
     save_playlist_store(&app, &store)?;
     Ok(playlists_with_counts(&store))
 }
@@ -638,7 +664,11 @@ fn add_track_to_playlist(
     track: TrackOutput,
 ) -> Result<Vec<PlaylistTrackOutput>, String> {
     let mut store = load_playlist_store(&app)?;
-    if !store.playlists.iter().any(|playlist| playlist.id == playlist_id) {
+    if !store
+        .playlists
+        .iter()
+        .any(|playlist| playlist.id == playlist_id)
+    {
         return Err("Playlist was not found.".to_string());
     }
     let next_position = store
@@ -649,7 +679,11 @@ fn add_track_to_playlist(
         .max()
         .unwrap_or(-1)
         + 1;
-    store.tracks.push(playlist_track_from_track(&playlist_id, &track, next_position));
+    store.tracks.push(playlist_track_from_track(
+        &playlist_id,
+        &track,
+        next_position,
+    ));
     touch_playlist(&mut store, &playlist_id);
     save_playlist_store(&app, &store)?;
     playlist_tracks_for_store(&store, &playlist_id)
@@ -662,9 +696,9 @@ fn remove_playlist_entry(
     entry_id: String,
 ) -> Result<Vec<PlaylistTrackOutput>, String> {
     let mut store = load_playlist_store(&app)?;
-    store.tracks.retain(|track| {
-        !(track.playlist_id == playlist_id && track.entry_id == entry_id)
-    });
+    store
+        .tracks
+        .retain(|track| !(track.playlist_id == playlist_id && track.entry_id == entry_id));
     touch_playlist(&mut store, &playlist_id);
     normalize_all_playlist_positions(&mut store);
     save_playlist_store(&app, &store)?;
@@ -707,24 +741,31 @@ fn load_download_folder(app: tauri::AppHandle) -> Result<DownloadFolderOutput, S
     active_download_folder_output(&app)
 }
 
-#[tauri::command]
-fn choose_download_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let selected = app
-        .dialog()
+async fn choose_folder_with_title(
+    app: tauri::AppHandle,
+    title: &'static str,
+) -> Result<Option<String>, String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    app.dialog()
         .file()
-        .set_title("Choose download folder")
-        .blocking_pick_folder();
-    Ok(selected.map(|path| path.to_string()))
+        .set_title(title)
+        .pick_folder(move |selected| {
+            let _ = sender.send(selected.map(|path| path.to_string()));
+        });
+    tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
-fn choose_export_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let selected = app
-        .dialog()
-        .file()
-        .set_title("Choose export folder")
-        .blocking_pick_folder();
-    Ok(selected.map(|path| path.to_string()))
+async fn choose_download_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    choose_folder_with_title(app, "Choose download folder").await
+}
+
+#[tauri::command]
+async fn choose_export_folder(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    choose_folder_with_title(app, "Choose export folder").await
 }
 
 #[tauri::command]
@@ -767,7 +808,9 @@ fn export_local_music(
     };
     let mut playlist_store = load_playlist_store(&app)?;
     if let Some(playlist_ids) = playlist_ids {
-        let playlist_ids = playlist_ids.into_iter().collect::<std::collections::BTreeSet<_>>();
+        let playlist_ids = playlist_ids
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
         playlist_store
             .playlists
             .retain(|playlist| playlist_ids.contains(&playlist.id));
@@ -798,16 +841,12 @@ async fn export_music_selection(
         clean_export(&target)?;
     }
 
-    let profile = require_saved_profile(&app)?;
-    let can_download_remote = profile.password.trim().len() > 0;
-    export_selected_music(
-        &target,
-        &profile,
-        can_download_remote,
-        direct_tracks,
-        playlists,
-    )
-    .await
+    let profile = if export_selection_needs_remote(&direct_tracks, &playlists) {
+        Some(require_saved_profile(&app)?)
+    } else {
+        None
+    };
+    export_selected_music(&target, profile.as_ref(), direct_tracks, playlists).await
 }
 
 #[tauri::command]
@@ -818,7 +857,10 @@ fn has_existing_export(target_folder: String) -> Result<bool, String> {
     }
     Ok(target.join(EXPORT_MANIFEST_FILE_NAME).exists()
         || target
-            .join(format!("{}.m3u", safe_filename(ALL_DOWNLOADS_PLAYLIST_NAME)))
+            .join(format!(
+                "{}.m3u",
+                safe_filename(ALL_DOWNLOADS_PLAYLIST_NAME)
+            ))
             .exists()
         || target
             .join(format!("{}.m3u", safe_filename(LIKED_PLAYLIST_NAME)))
@@ -881,8 +923,7 @@ fn move_downloads_to_default_folder(
 fn open_download_folder(app: tauri::AppHandle) -> Result<(), String> {
     let folder = active_download_folder(&app)?;
     fs::create_dir_all(&folder).map_err(|error| error.to_string())?;
-    tauri_plugin_opener::open_path(folder, None::<&str>)
-        .map_err(|error| error.to_string())
+    tauri_plugin_opener::open_path(folder, None::<&str>).map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -926,7 +967,8 @@ async fn download_track(
         if let Some(parent) = PathBuf::from(&local_path).parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
-        let mut partial_file = fs::File::create(&partial_path).map_err(|error| error.to_string())?;
+        let mut partial_file =
+            fs::File::create(&partial_path).map_err(|error| error.to_string())?;
         partial_file
             .write_all(&bytes)
             .map_err(|error| error.to_string())?;
@@ -1041,11 +1083,7 @@ async fn test_connection(profile: ServerProfileInput) -> Result<ServerProfileInp
         .build()
         .map_err(|error| format!("Connection failed: {error}"))?;
 
-    let response = client
-        .get(uri)
-        .send()
-        .await
-        .map_err(format_reqwest_error)?;
+    let response = client.get(uri).send().await.map_err(format_reqwest_error)?;
 
     if !response.status().is_success() {
         return Err(format!("Server responded with HTTP {}.", response.status()));
@@ -1105,11 +1143,7 @@ async fn get_subsonic(
         .build()
         .map_err(|error| format!("Server request failed: {error}"))?;
 
-    let response = client
-        .get(uri)
-        .send()
-        .await
-        .map_err(format_reqwest_error)?;
+    let response = client.get(uri).send().await.map_err(format_reqwest_error)?;
 
     if !response.status().is_success() {
         return Err(format!("Server responded with HTTP {}.", response.status()));
@@ -1186,9 +1220,7 @@ fn save_profile(app: &tauri::AppHandle, profile: &ServerProfileInput) -> Result<
     Ok(())
 }
 
-fn load_profile_metadata(
-    app: &tauri::AppHandle,
-) -> Result<Option<ServerProfileMetadata>, String> {
+fn load_profile_metadata(app: &tauri::AppHandle) -> Result<Option<ServerProfileMetadata>, String> {
     let path = profile_path(app)?;
     if !path.exists() {
         return Ok(None);
@@ -1208,13 +1240,17 @@ fn require_saved_profile(app: &tauri::AppHandle) -> Result<SavedServerProfile, S
     let metadata = load_profile_metadata(app)?
         .ok_or_else(|| "Connect to your server in Settings first.".to_string())?;
     if !metadata.remember_password {
-        return Err("Saved credentials do not include a password. Reconnect in Settings.".to_string());
+        return Err(
+            "Saved credentials do not include a password. Reconnect in Settings.".to_string(),
+        );
     }
     let password = load_password(app).map_err(|_| {
         "Saved credentials do not include a password. Reconnect in Settings.".to_string()
     })?;
     if password.is_empty() {
-        return Err("Saved credentials do not include a password. Reconnect in Settings.".to_string());
+        return Err(
+            "Saved credentials do not include a password. Reconnect in Settings.".to_string(),
+        );
     }
 
     Ok(SavedServerProfile {
@@ -1519,23 +1555,30 @@ fn keyring_entry() -> Result<keyring::Entry, String> {
 }
 
 fn save_password(app: &tauri::AppHandle, password: &str) -> Result<(), String> {
-    match keyring_entry().and_then(|entry| entry.set_password(password).map_err(|error| error.to_string())) {
+    match keyring_entry().and_then(|entry| {
+        entry
+            .set_password(password)
+            .map_err(|error| error.to_string())
+    }) {
         Ok(()) => {
             let _ = save_password_fallback_for_app(app, password);
             Ok(())
         }
         Err(keychain_error) => {
-            save_password_fallback_for_app(app, password)
-                .map_err(|fallback_error| format!("{keychain_error}; fallback save failed: {fallback_error}"))
+            save_password_fallback_for_app(app, password).map_err(|fallback_error| {
+                format!("{keychain_error}; fallback save failed: {fallback_error}")
+            })
         }
     }
 }
 
 fn load_password(app: &tauri::AppHandle) -> Result<String, String> {
-    match keyring_entry().and_then(|entry| entry.get_password().map_err(|error| error.to_string())) {
+    match keyring_entry().and_then(|entry| entry.get_password().map_err(|error| error.to_string()))
+    {
         Ok(password) => Ok(password),
-        Err(keychain_error) => load_password_fallback_for_app(app)
-            .map_err(|fallback_error| format!("{keychain_error}; fallback load failed: {fallback_error}")),
+        Err(keychain_error) => load_password_fallback_for_app(app).map_err(|fallback_error| {
+            format!("{keychain_error}; fallback load failed: {fallback_error}")
+        }),
     }
 }
 
@@ -1547,9 +1590,9 @@ fn delete_password(app: &tauri::AppHandle) -> Result<(), String> {
 
     match (keychain_result, fallback_result) {
         (Ok(()), _) | (_, Ok(())) => Ok(()),
-        (Err(keychain_error), Err(fallback_error)) => {
-            Err(format!("{keychain_error}; fallback delete failed: {fallback_error}"))
-        }
+        (Err(keychain_error), Err(fallback_error)) => Err(format!(
+            "{keychain_error}; fallback delete failed: {fallback_error}"
+        )),
     }
 }
 
@@ -1590,7 +1633,6 @@ fn delete_password_fallback_for_app(app: &tauri::AppHandle) -> Result<(), String
     }
     Ok(())
 }
-
 
 fn normalize_base_url(input: &str) -> Result<Url, String> {
     let trimmed = input.trim();
@@ -1713,7 +1755,11 @@ fn search_result_from_subsonic(
     LibrarySearchResultOutput { albums, tracks }
 }
 
-fn cover_art_uri(profile: &SavedServerProfile, cover_art_id: Option<&str>, size: i64) -> Option<String> {
+fn cover_art_uri(
+    profile: &SavedServerProfile,
+    cover_art_id: Option<&str>,
+    size: i64,
+) -> Option<String> {
     let cover_art_id = cover_art_id.filter(|value| !value.is_empty())?;
     let mut uri = normalize_base_url(&profile.server_url).ok()?;
     let rest_path = join_url_path(uri.path(), "rest/getCoverArt.view");
@@ -1751,7 +1797,10 @@ fn stream_uri(profile: &SavedServerProfile, track_id: &str) -> Option<String> {
     Some(uri.to_string())
 }
 
-async fn download_track_bytes(profile: &SavedServerProfile, track_id: &str) -> Result<bytes::Bytes, String> {
+async fn download_track_bytes(
+    profile: &SavedServerProfile,
+    track_id: &str,
+) -> Result<bytes::Bytes, String> {
     let uri = download_uri(profile, track_id)
         .ok_or_else(|| "Track download URL could not be created.".to_string())?;
     let client = reqwest::Client::builder()
@@ -1793,7 +1842,13 @@ async fn ensure_album_cover(app: &tauri::AppHandle, track: &TrackOutput) -> Resu
         .ok_or_else(|| "Track has no cover art.".to_string())?;
     let cover_path = local_cover_path_for_track(app, track)?;
     let cover_file = PathBuf::from(&cover_path);
-    if cover_file.exists() && cover_file.metadata().map(|metadata| metadata.len()).unwrap_or(0) > 0 {
+    if cover_file.exists()
+        && cover_file
+            .metadata()
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+            > 0
+    {
         return Ok(cover_path);
     }
     if let Some(parent) = cover_file.parent() {
@@ -1871,7 +1926,9 @@ fn load_liked_tracks_from_disk(app: &tauri::AppHandle) -> Result<Vec<LikedTrackO
 
 fn save_liked_tracks(app: &tauri::AppHandle, tracks: &[LikedTrackOutput]) -> Result<(), String> {
     let mut connection = open_download_database(app)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     transaction
         .execute("DELETE FROM liked_tracks", [])
         .map_err(|error| error.to_string())?;
@@ -2004,7 +2061,9 @@ fn load_playlist_store(app: &tauri::AppHandle) -> Result<PlaylistStore, String> 
 
 fn save_playlist_store(app: &tauri::AppHandle, store: &PlaylistStore) -> Result<(), String> {
     let mut connection = open_download_database(app)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let mut next = store.clone();
     normalize_all_playlist_positions(&mut next);
     transaction
@@ -2143,7 +2202,9 @@ fn option_i64_to_u64(value: Option<i64>) -> Option<u64> {
 
 fn option_u64_to_i64(value: Option<u64>) -> Result<Option<i64>, String> {
     value
-        .map(|number| i64::try_from(number).map_err(|_| "Stored byte count is too large.".to_string()))
+        .map(|number| {
+            i64::try_from(number).map_err(|_| "Stored byte count is too large.".to_string())
+        })
         .transpose()
 }
 
@@ -2319,10 +2380,7 @@ fn insert_downloads(
     Ok(())
 }
 
-fn insert_liked_tracks(
-    connection: &Connection,
-    tracks: &[LikedTrackOutput],
-) -> Result<(), String> {
+fn insert_liked_tracks(connection: &Connection, tracks: &[LikedTrackOutput]) -> Result<(), String> {
     let mut sorted = tracks.to_vec();
     normalize_liked_positions(&mut sorted);
     let mut statement = connection
@@ -2519,9 +2577,14 @@ fn playlist_track_from_track(
     }
 }
 
-fn save_downloads(app: &tauri::AppHandle, downloads: &[DownloadedTrackOutput]) -> Result<(), String> {
+fn save_downloads(
+    app: &tauri::AppHandle,
+    downloads: &[DownloadedTrackOutput],
+) -> Result<(), String> {
     let mut connection = open_download_database(app)?;
-    let transaction = connection.transaction().map_err(|error| error.to_string())?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
     let mut sorted = downloads.to_vec();
     sorted.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     transaction
@@ -2572,7 +2635,9 @@ fn repair_downloads(app: &tauri::AppHandle) -> Result<Vec<DownloadedTrackOutput>
     Ok(repair_downloads_with_result(app)?.tracks)
 }
 
-fn repair_downloads_with_result(app: &tauri::AppHandle) -> Result<DownloadRepairResultOutput, String> {
+fn repair_downloads_with_result(
+    app: &tauri::AppHandle,
+) -> Result<DownloadRepairResultOutput, String> {
     let mut repaired = Vec::new();
     let mut removed_downloads = Vec::new();
     let mut removed_audio_count = 0_i64;
@@ -2590,7 +2655,11 @@ fn repair_downloads_with_result(app: &tauri::AppHandle) -> Result<DownloadRepair
             removed_audio_count += 1;
             continue;
         }
-        if let Some(cover_path) = download.local_cover_path.as_ref().filter(|path| !path.is_empty()) {
+        if let Some(cover_path) = download
+            .local_cover_path
+            .as_ref()
+            .filter(|path| !path.is_empty())
+        {
             if !is_usable_file(cover_path, None) {
                 if let Some(recovered_path) = recover_album_cover_path(&download) {
                     download.local_cover_path = Some(recovered_path);
@@ -2641,8 +2710,14 @@ async fn repair_missing_album_covers(
 
     for download in &mut result.tracks {
         if download.state != "complete"
-            || download.local_cover_path.as_ref().is_some_and(|path| !path.is_empty())
-            || download.cover_art_uri.as_ref().is_none_or(|uri| uri.is_empty())
+            || download
+                .local_cover_path
+                .as_ref()
+                .is_some_and(|path| !path.is_empty())
+            || download
+                .cover_art_uri
+                .as_ref()
+                .is_none_or(|uri| uri.is_empty())
             || !is_usable_file(&download.local_path, download.bytes)
         {
             continue;
@@ -2690,13 +2765,11 @@ fn complete_download_for_track(
     app: &tauri::AppHandle,
     track_id: &str,
 ) -> Result<Option<DownloadedTrackOutput>, String> {
-    Ok(repair_downloads(app)?
-        .into_iter()
-        .find(|download| {
-            download.track_id == track_id
-                && download.state == "complete"
-                && is_usable_file(&download.local_path, download.bytes)
-        }))
+    Ok(repair_downloads(app)?.into_iter().find(|download| {
+        download.track_id == track_id
+            && download.state == "complete"
+            && is_usable_file(&download.local_path, download.bytes)
+    }))
 }
 
 fn downloaded_album_details(app: &tauri::AppHandle) -> Result<Vec<AlbumDetailOutput>, String> {
@@ -2730,7 +2803,10 @@ fn downloaded_album_details(app: &tauri::AppHandle) -> Result<Vec<AlbumDetailOut
             .sum::<i64>();
         let album = AlbumOutput {
             id: first.album_id.clone().unwrap_or(key),
-            name: first.album_name.clone().unwrap_or_else(|| "Downloads".to_string()),
+            name: first
+                .album_name
+                .clone()
+                .unwrap_or_else(|| "Downloads".to_string()),
             artist: first.artist.clone(),
             song_count: tracks.len() as i64,
             duration_seconds,
@@ -2754,7 +2830,10 @@ fn downloaded_album_details(app: &tauri::AppHandle) -> Result<Vec<AlbumDetailOut
     Ok(details)
 }
 
-fn search_downloaded_details(app: &tauri::AppHandle, query: &str) -> Result<LibrarySearchResultOutput, String> {
+fn search_downloaded_details(
+    app: &tauri::AppHandle,
+    query: &str,
+) -> Result<LibrarySearchResultOutput, String> {
     let lower_query = query.to_lowercase();
     let trimmed_lower_query = lower_query.trim();
     let normalized_query = normalize_search_text(query);
@@ -2908,22 +2987,34 @@ fn local_path_for_track(app: &tauri::AppHandle, track: &TrackOutput) -> Result<S
     } else {
         format!("{number}{title} - {}", track.id)
     };
-    Ok(directory.join(safe_filename(&filename)).to_string_lossy().to_string())
+    Ok(directory
+        .join(safe_filename(&filename))
+        .to_string_lossy()
+        .to_string())
 }
 
-fn local_cover_path_for_track(app: &tauri::AppHandle, track: &TrackOutput) -> Result<String, String> {
+fn local_cover_path_for_track(
+    app: &tauri::AppHandle,
+    track: &TrackOutput,
+) -> Result<String, String> {
     Ok(album_directory_for_track(app, track)?
         .join("cover.jpg")
         .to_string_lossy()
         .to_string())
 }
 
-fn album_directory_for_track(app: &tauri::AppHandle, track: &TrackOutput) -> Result<PathBuf, String> {
+fn album_directory_for_track(
+    app: &tauri::AppHandle,
+    track: &TrackOutput,
+) -> Result<PathBuf, String> {
     let root = active_download_folder(app)?;
     album_directory_for_track_in_root(track, &root)
 }
 
-fn album_directory_for_track_in_root(track: &TrackOutput, root: &PathBuf) -> Result<PathBuf, String> {
+fn album_directory_for_track_in_root(
+    track: &TrackOutput,
+    root: &PathBuf,
+) -> Result<PathBuf, String> {
     let album_name = track.album_name.as_deref().unwrap_or("Unknown Album");
     let artist_folder_name = safe_filename(&track.artist);
     let album_folder_name = safe_filename(album_name);
@@ -2945,7 +3036,10 @@ fn local_path_for_track_in_directory(track: &TrackOutput, directory: &PathBuf) -
     } else {
         format!("{number}{title} - {}", track.id)
     };
-    directory.join(safe_filename(&filename)).to_string_lossy().to_string()
+    directory
+        .join(safe_filename(&filename))
+        .to_string_lossy()
+        .to_string()
 }
 
 fn move_downloads_to_root(
@@ -2963,7 +3057,8 @@ fn move_downloads_to_root(
     for download in downloads {
         let track = track_output_from_download(download.clone());
         let destination_directory = album_directory_for_track_in_root(&track, &target_root)?;
-        let destination_audio_path = local_path_for_track_in_directory(&track, &destination_directory);
+        let destination_audio_path =
+            local_path_for_track_in_directory(&track, &destination_directory);
         let mut next_download = DownloadedTrackOutput {
             local_path: destination_audio_path.clone(),
             updated_at: now_timestamp(),
@@ -2989,7 +3084,9 @@ fn move_downloads_to_root(
             delete_file_if_present(&format!("{}.partial", download.local_path))?;
         }
 
-        if let Some(cover_path) = cover_path_for_download(&download).filter(|path| is_usable_file(path, None)) {
+        if let Some(cover_path) =
+            cover_path_for_download(&download).filter(|path| is_usable_file(path, None))
+        {
             let destination_cover_path = destination_directory
                 .join("cover.jpg")
                 .to_string_lossy()
@@ -3053,7 +3150,10 @@ fn write_folder_manifests(downloads: &[DownloadedTrackOutput]) -> Result<(), Str
             continue;
         }
         if let Some(parent) = PathBuf::from(&download.local_path).parent() {
-            groups.entry(parent.to_path_buf()).or_default().push(download.clone());
+            groups
+                .entry(parent.to_path_buf())
+                .or_default()
+                .push(download.clone());
         }
     }
     for (directory, tracks) in groups {
@@ -3074,7 +3174,10 @@ fn cleanup_unused_download_directory(
     if local_path.is_empty() {
         return Ok(());
     }
-    let Some(directory) = PathBuf::from(local_path).parent().map(|path| path.to_path_buf()) else {
+    let Some(directory) = PathBuf::from(local_path)
+        .parent()
+        .map(|path| path.to_path_buf())
+    else {
         return Ok(());
     };
     let is_still_used = remaining_downloads.iter().any(|download| {
@@ -3089,7 +3192,11 @@ fn cleanup_unused_download_directory(
         return Ok(());
     }
 
-    delete_file_if_present(&directory.join(DOWNLOADS_MANIFEST_FILE_NAME).to_string_lossy())?;
+    delete_file_if_present(
+        &directory
+            .join(DOWNLOADS_MANIFEST_FILE_NAME)
+            .to_string_lossy(),
+    )?;
     remove_directory_if_empty(&directory)?;
     if let Some(parent) = directory.parent() {
         remove_directory_if_empty(parent)?;
@@ -3108,22 +3215,64 @@ fn remove_directory_if_empty(directory: &std::path::Path) -> Result<(), String> 
     Ok(())
 }
 
+fn export_request_has_usable_local_download(request: &ExportTrackInput) -> bool {
+    request.local_download.as_ref().is_some_and(|download| {
+        download.state == "complete" && is_usable_file(&download.local_path, download.bytes)
+    })
+}
+
+fn insert_export_request(
+    unique_tracks: &mut std::collections::BTreeMap<String, ExportTrackInput>,
+    request: ExportTrackInput,
+) {
+    let new_has_local = export_request_has_usable_local_download(&request);
+    match unique_tracks.get(&request.track.id) {
+        Some(existing) if export_request_has_usable_local_download(existing) || !new_has_local => {}
+        _ => {
+            unique_tracks.insert(request.track.id.clone(), request);
+        }
+    }
+}
+
+fn export_selection_needs_remote(
+    direct_tracks: &[ExportTrackInput],
+    playlists: &[ExportPlaylistInput],
+) -> bool {
+    let mut selected_track_has_local = std::collections::BTreeMap::<String, bool>::new();
+    for request in direct_tracks {
+        let has_local = export_request_has_usable_local_download(request);
+        selected_track_has_local
+            .entry(request.track.id.clone())
+            .and_modify(|current| *current = *current || has_local)
+            .or_insert(has_local);
+    }
+    for playlist in playlists {
+        for request in &playlist.tracks {
+            let has_local = export_request_has_usable_local_download(request);
+            selected_track_has_local
+                .entry(request.track.id.clone())
+                .and_modify(|current| *current = *current || has_local)
+                .or_insert(has_local);
+        }
+    }
+    selected_track_has_local
+        .values()
+        .any(|has_local| !has_local)
+}
+
 async fn export_selected_music(
     target: &PathBuf,
-    profile: &SavedServerProfile,
-    can_download_remote: bool,
+    profile: Option<&SavedServerProfile>,
     direct_tracks: Vec<ExportTrackInput>,
     playlists: Vec<ExportPlaylistInput>,
 ) -> Result<MusicExportResultOutput, String> {
     let mut unique_tracks = std::collections::BTreeMap::<String, ExportTrackInput>::new();
     for request in direct_tracks {
-        unique_tracks.entry(request.track.id.clone()).or_insert(request);
+        insert_export_request(&mut unique_tracks, request);
     }
     for playlist in &playlists {
         for request in &playlist.tracks {
-            unique_tracks
-                .entry(request.track.id.clone())
-                .or_insert_with(|| request.clone());
+            insert_export_request(&mut unique_tracks, request.clone());
         }
     }
 
@@ -3146,7 +3295,9 @@ async fn export_selected_music(
         let album_directory = target
             .join("Music")
             .join(safe_filename(&track.artist))
-            .join(safe_filename(track.album_name.as_deref().unwrap_or("Unknown Album")));
+            .join(safe_filename(
+                track.album_name.as_deref().unwrap_or("Unknown Album"),
+            ));
         fs::create_dir_all(&album_directory).map_err(|error| error.to_string())?;
         let destination = unique_export_destination_for_track(
             target,
@@ -3175,7 +3326,11 @@ async fn export_selected_music(
             }
         }
 
-        if !did_export_track && can_download_remote {
+        if !did_export_track {
+            let Some(profile) = profile else {
+                skipped_track_count += 1;
+                continue;
+            };
             let partial_destination = destination.with_extension(format!(
                 "{}partial",
                 destination
@@ -3188,7 +3343,8 @@ async fn export_selected_music(
             if !bytes.is_empty() {
                 fs::write(&partial_destination, bytes).map_err(|error| error.to_string())?;
                 delete_file_if_present(&destination.to_string_lossy())?;
-                fs::rename(&partial_destination, &destination).map_err(|error| error.to_string())?;
+                fs::rename(&partial_destination, &destination)
+                    .map_err(|error| error.to_string())?;
                 downloaded_track_count += 1;
                 did_export_track = true;
             }
@@ -3213,9 +3369,9 @@ async fn export_selected_music(
 
         let destination_cover = album_directory.join("cover.jpg");
         if let Some(local_download) = request.local_download.as_ref() {
-            if let Some(cover_path) = cover_path_for_download(local_download).filter(|path| {
-                !copied_cover_sources.contains(path) && is_usable_file(path, None)
-            }) {
+            if let Some(cover_path) = cover_path_for_download(local_download)
+                .filter(|path| !copied_cover_sources.contains(path) && is_usable_file(path, None))
+            {
                 fs::copy(&cover_path, &destination_cover).map_err(|error| error.to_string())?;
                 artifact_relative_paths.insert(relative_export_path(target, &destination_cover)?);
                 copied_cover_sources.insert(cover_path);
@@ -3225,9 +3381,14 @@ async fn export_selected_music(
         }
 
         if !is_usable_file(&destination_cover.to_string_lossy(), None) {
-            if let Some(cover_uri) = track.cover_art_uri.as_ref().filter(|value| !value.is_empty()) {
+            if let Some(cover_uri) = track
+                .cover_art_uri
+                .as_ref()
+                .filter(|value| !value.is_empty())
+            {
                 if download_export_cover(cover_uri, &destination_cover).await? {
-                    artifact_relative_paths.insert(relative_export_path(target, &destination_cover)?);
+                    artifact_relative_paths
+                        .insert(relative_export_path(target, &destination_cover)?);
                     downloaded_cover_count += 1;
                 }
             }
@@ -3251,7 +3412,8 @@ async fn export_selected_music(
             continue;
         }
         fs::create_dir_all(&playlists_directory).map_err(|error| error.to_string())?;
-        let playlist_path = playlists_directory.join(format!("{}.m3u", safe_filename(&playlist.name)));
+        let playlist_path =
+            playlists_directory.join(format!("{}.m3u", safe_filename(&playlist.name)));
         write_m3u(&playlist_path, &exported_tracks)?;
         artifact_relative_paths.insert(relative_export_path(target, &playlist_path)?);
         playlist_count += 1;
@@ -3343,7 +3505,9 @@ fn export_complete_downloads(
         let album_directory = target
             .join("Music")
             .join(safe_filename(&download.artist))
-            .join(safe_filename(download.album_name.as_deref().unwrap_or("Unknown Album")));
+            .join(safe_filename(
+                download.album_name.as_deref().unwrap_or("Unknown Album"),
+            ));
         fs::create_dir_all(&album_directory).map_err(|error| error.to_string())?;
         let destination = unique_export_destination(
             target,
@@ -3351,10 +3515,11 @@ fn export_complete_downloads(
             &download,
             &mut reserved_relative_paths,
         )?;
-        if export_filename_for_download(&download) != destination
-            .file_name()
-            .map(|value| value.to_string_lossy().to_string())
-            .unwrap_or_default()
+        if export_filename_for_download(&download)
+            != destination
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_default()
         {
             collision_count += 1;
         }
@@ -3372,9 +3537,9 @@ fn export_complete_downloads(
         );
         exported_track_count += 1;
 
-        if let Some(cover_path) = cover_path_for_download(&download).filter(|path| {
-            !copied_cover_sources.contains(path) && is_usable_file(path, None)
-        }) {
+        if let Some(cover_path) = cover_path_for_download(&download)
+            .filter(|path| !copied_cover_sources.contains(path) && is_usable_file(path, None))
+        {
             let destination_cover = album_directory.join("cover.jpg");
             fs::copy(&cover_path, &destination_cover).map_err(|error| error.to_string())?;
             artifact_relative_paths.insert(relative_export_path(target, &destination_cover)?);
@@ -3389,7 +3554,10 @@ fn export_complete_downloads(
 
     let all_downloads_tracks = exported_by_id.values().cloned().collect::<Vec<_>>();
     if !all_downloads_tracks.is_empty() {
-        let playlist_path = target.join(format!("{}.m3u", safe_filename(ALL_DOWNLOADS_PLAYLIST_NAME)));
+        let playlist_path = target.join(format!(
+            "{}.m3u",
+            safe_filename(ALL_DOWNLOADS_PLAYLIST_NAME)
+        ));
         write_m3u(&playlist_path, &all_downloads_tracks)?;
         artifact_relative_paths.insert(relative_export_path(target, &playlist_path)?);
         playlist_count += 1;
@@ -3428,7 +3596,8 @@ fn export_complete_downloads(
             continue;
         }
         fs::create_dir_all(&playlists_directory).map_err(|error| error.to_string())?;
-        let playlist_path = playlists_directory.join(format!("{}.m3u", safe_filename(&playlist.name)));
+        let playlist_path =
+            playlists_directory.join(format!("{}.m3u", safe_filename(&playlist.name)));
         write_m3u(&playlist_path, &exported_tracks)?;
         artifact_relative_paths.insert(relative_export_path(target, &playlist_path)?);
         playlist_count += 1;
@@ -3475,7 +3644,10 @@ fn write_m3u(path: &PathBuf, tracks: &[ExportedTrack]) -> Result<(), String> {
     fs::write(path, format!("{}\n", lines.join("\n"))).map_err(|error| error.to_string())
 }
 
-fn compare_downloads_for_export(left: &DownloadedTrackOutput, right: &DownloadedTrackOutput) -> std::cmp::Ordering {
+fn compare_downloads_for_export(
+    left: &DownloadedTrackOutput,
+    right: &DownloadedTrackOutput,
+) -> std::cmp::Ordering {
     left.artist
         .cmp(&right.artist)
         .then_with(|| left.album_name.cmp(&right.album_name))
@@ -3582,9 +3754,7 @@ fn export_filename_for_track(track: &TrackOutput) -> String {
 }
 
 fn relative_export_path(root: &PathBuf, file: &PathBuf) -> Result<String, String> {
-    let relative = file
-        .strip_prefix(root)
-        .map_err(|error| error.to_string())?;
+    let relative = file.strip_prefix(root).map_err(|error| error.to_string())?;
     Ok(relative
         .components()
         .map(|component| component.as_os_str().to_string_lossy().to_string())
@@ -3605,11 +3775,14 @@ fn write_export_manifest(target: &PathBuf, relative_paths: Vec<String>) -> Resul
         "paths": paths,
     });
     let manifest_path = target.join(EXPORT_MANIFEST_FILE_NAME);
-    let manifest_json = serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
+    let manifest_json =
+        serde_json::to_string_pretty(&manifest).map_err(|error| error.to_string())?;
     fs::write(&manifest_path, manifest_json).map_err(|error| error.to_string())
 }
 
-fn read_export_manifest_paths(target: &PathBuf) -> Result<std::collections::BTreeSet<String>, String> {
+fn read_export_manifest_paths(
+    target: &PathBuf,
+) -> Result<std::collections::BTreeSet<String>, String> {
     let manifest_path = target.join(EXPORT_MANIFEST_FILE_NAME);
     if !manifest_path.exists() {
         return Ok(std::collections::BTreeSet::new());
@@ -3644,7 +3817,10 @@ fn is_unsafe_relative_path(path: &str) -> bool {
 
 fn clean_export(target: &PathBuf) -> Result<i64, String> {
     let mut relative_paths = read_export_manifest_paths(target)?;
-    relative_paths.insert(format!("{}.m3u", safe_filename(ALL_DOWNLOADS_PLAYLIST_NAME)));
+    relative_paths.insert(format!(
+        "{}.m3u",
+        safe_filename(ALL_DOWNLOADS_PLAYLIST_NAME)
+    ));
     relative_paths.insert(format!("{}.m3u", safe_filename(LIKED_PLAYLIST_NAME)));
     relative_paths.insert(EXPORT_MANIFEST_FILE_NAME.to_string());
 
@@ -3721,8 +3897,7 @@ fn safe_filename(value: &str) -> String {
     let mut output = String::new();
     let mut last_was_separator = false;
     for character in value.chars() {
-        let is_allowed = character.is_ascii_alphanumeric()
-            || matches!(character, '.' | '_' | '-');
+        let is_allowed = character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-');
         if is_allowed {
             output.push(character);
             last_was_separator = false;
@@ -3867,19 +4042,15 @@ mod tests {
     use super::*;
 
     fn temp_export_dir(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "nekofm-export-test-{name}-{}",
-            now_timestamp()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("nekofm-export-test-{name}-{}", now_timestamp()));
         fs::create_dir_all(&directory).expect("create temp export dir");
         directory
     }
 
     fn temp_download_dir(name: &str) -> PathBuf {
-        let directory = std::env::temp_dir().join(format!(
-            "nekofm-download-test-{name}-{}",
-            now_timestamp()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("nekofm-download-test-{name}-{}", now_timestamp()));
         fs::create_dir_all(&directory).expect("create temp download dir");
         directory
     }
@@ -4000,11 +4171,8 @@ mod tests {
         let manifest_path = directory.join(EXPORT_MANIFEST_FILE_NAME);
         fs::write(
             &manifest_path,
-            serde_json::to_string(&vec![
-                "Music/Artist/Album/02 - Song.flac",
-                "/unsafe.flac",
-            ])
-            .expect("encode legacy manifest"),
+            serde_json::to_string(&vec!["Music/Artist/Album/02 - Song.flac", "/unsafe.flac"])
+                .expect("encode legacy manifest"),
         )
         .expect("write legacy manifest");
 
@@ -4032,18 +4200,21 @@ mod tests {
         let connection = Connection::open_in_memory().expect("open in-memory sqlite");
         initialize_download_database(&connection).expect("initialize database");
 
-        assert!(!has_storage_migration(&connection, "legacy_liked_tracks_json_v1")
-            .expect("check migration"));
+        assert!(
+            !has_storage_migration(&connection, "legacy_liked_tracks_json_v1")
+                .expect("check migration")
+        );
         assert_eq!(
             table_count(&connection, "liked_tracks").expect("count liked tracks"),
             0,
         );
 
-        mark_storage_migration(&connection, "legacy_liked_tracks_json_v1")
-            .expect("mark migration");
+        mark_storage_migration(&connection, "legacy_liked_tracks_json_v1").expect("mark migration");
 
-        assert!(has_storage_migration(&connection, "legacy_liked_tracks_json_v1")
-            .expect("check migration"));
+        assert!(
+            has_storage_migration(&connection, "legacy_liked_tracks_json_v1")
+                .expect("check migration")
+        );
         assert_eq!(
             table_count(&connection, "liked_tracks").expect("count liked tracks"),
             0,
