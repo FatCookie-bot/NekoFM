@@ -14,6 +14,7 @@ use url::Url;
 const KEYCHAIN_SERVICE: &str = "NekoFM";
 const KEYCHAIN_PASSWORD_ACCOUNT: &str = "server_profile.password";
 const PROFILE_FILE_NAME: &str = "server-profile.json";
+const PASSWORD_FALLBACK_FILE_NAME: &str = "server-password.local";
 const PLAYBACK_PREFERENCES_FILE_NAME: &str = "playback-preferences.json";
 const DOWNLOADS_FILE_NAME: &str = "downloads.json";
 const LIKED_TRACKS_FILE_NAME: &str = "liked-tracks.json";
@@ -317,7 +318,13 @@ fn load_server_profile(
     };
 
     let password = if metadata.remember_password {
-        load_password().unwrap_or_default()
+        let loaded = load_password(&app).map_err(|error| {
+            format!("Saved profile exists, but the password could not be loaded from Keychain: {error}")
+        })?;
+        if loaded.is_empty() {
+            return Err("Saved profile exists, but the saved password is empty. Reconnect in Settings.".to_string());
+        }
+        loaded
     } else {
         String::new()
     };
@@ -461,7 +468,7 @@ fn get_playback_source(app: tauri::AppHandle, track_id: String) -> Result<Playba
     if let Some(download) = complete_download_for_track(&app, &track_id)? {
         let path = PathBuf::from(&download.local_path);
         return Ok(PlaybackSourceOutput {
-            uri: format!("file://{}", path.to_string_lossy()),
+            uri: path.to_string_lossy().to_string(),
             source: "local".to_string(),
         });
     }
@@ -1171,9 +1178,9 @@ fn save_profile(app: &tauri::AppHandle, profile: &ServerProfileInput) -> Result<
     fs::write(path, json).map_err(|error| error.to_string())?;
 
     if profile.remember_password {
-        save_password(&profile.password)?;
+        save_password(app, &profile.password)?;
     } else {
-        let _ = delete_password();
+        let _ = delete_password(app);
     }
 
     Ok(())
@@ -1203,7 +1210,7 @@ fn require_saved_profile(app: &tauri::AppHandle) -> Result<SavedServerProfile, S
     if !metadata.remember_password {
         return Err("Saved credentials do not include a password. Reconnect in Settings.".to_string());
     }
-    let password = load_password().map_err(|_| {
+    let password = load_password(app).map_err(|_| {
         "Saved credentials do not include a password. Reconnect in Settings.".to_string()
     })?;
     if password.is_empty() {
@@ -1511,19 +1518,79 @@ fn keyring_entry() -> Result<keyring::Entry, String> {
         .map_err(|error| error.to_string())
 }
 
-fn save_password(password: &str) -> Result<(), String> {
-    keyring_entry()?.set_password(password).map_err(|error| error.to_string())
+fn save_password(app: &tauri::AppHandle, password: &str) -> Result<(), String> {
+    match keyring_entry().and_then(|entry| entry.set_password(password).map_err(|error| error.to_string())) {
+        Ok(()) => {
+            let _ = save_password_fallback_for_app(app, password);
+            Ok(())
+        }
+        Err(keychain_error) => {
+            save_password_fallback_for_app(app, password)
+                .map_err(|fallback_error| format!("{keychain_error}; fallback save failed: {fallback_error}"))
+        }
+    }
 }
 
-fn load_password() -> Result<String, String> {
-    keyring_entry()?.get_password().map_err(|error| error.to_string())
+fn load_password(app: &tauri::AppHandle) -> Result<String, String> {
+    match keyring_entry().and_then(|entry| entry.get_password().map_err(|error| error.to_string())) {
+        Ok(password) => Ok(password),
+        Err(keychain_error) => load_password_fallback_for_app(app)
+            .map_err(|fallback_error| format!("{keychain_error}; fallback load failed: {fallback_error}")),
+    }
 }
 
-fn delete_password() -> Result<(), String> {
-    keyring_entry()?
+fn delete_password(app: &tauri::AppHandle) -> Result<(), String> {
+    let keychain_result = keyring_entry()?
         .delete_credential()
+        .map_err(|error| error.to_string());
+    let fallback_result = delete_password_fallback_for_app(app);
+
+    match (keychain_result, fallback_result) {
+        (Ok(()), _) | (_, Ok(())) => Ok(()),
+        (Err(keychain_error), Err(fallback_error)) => {
+            Err(format!("{keychain_error}; fallback delete failed: {fallback_error}"))
+        }
+    }
+}
+
+fn password_fallback_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    Ok(directory.join(PASSWORD_FALLBACK_FILE_NAME))
+}
+
+fn save_password_fallback_for_app(app: &tauri::AppHandle, password: &str) -> Result<(), String> {
+    let path = password_fallback_path(app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(&path, password).map_err(|error| error.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let permissions = fs::Permissions::from_mode(0o600);
+        fs::set_permissions(&path, permissions).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn load_password_fallback_for_app(app: &tauri::AppHandle) -> Result<String, String> {
+    let path = password_fallback_path(app)?;
+    fs::read_to_string(path)
+        .map(|password| password.trim_end_matches(['\r', '\n']).to_string())
         .map_err(|error| error.to_string())
 }
+
+fn delete_password_fallback_for_app(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = password_fallback_path(app)?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 
 fn normalize_base_url(input: &str) -> Result<Url, String> {
     let trimmed = input.trim();

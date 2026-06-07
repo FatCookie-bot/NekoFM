@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import {
   Album,
   ArrowLeft,
@@ -781,7 +781,9 @@ function App() {
           return;
         }
 
-        audio.src = playbackSource.uri;
+        audio.src = playbackSource.source === "local"
+          ? convertFileSrc(stripFileProtocol(playbackSource.uri))
+          : playbackSource.uri;
         audio.currentTime = 0;
         if (shouldAutoPlay) {
           await audio.play();
@@ -3094,7 +3096,18 @@ function albumFromTrack(track: TrackModel): AlbumModel {
 }
 
 function localOrRemoteCover(download: DownloadedTrack) {
-  return download.localCoverPath ? `file://${download.localCoverPath}` : download.coverArtUri;
+  return download.localCoverPath ? convertFileSrc(download.localCoverPath) : download.coverArtUri;
+}
+
+function stripFileProtocol(pathOrUri: string) {
+  if (pathOrUri.startsWith("file://")) {
+    try {
+      return decodeURIComponent(new URL(pathOrUri).pathname);
+    } catch {
+      return pathOrUri.slice("file://".length);
+    }
+  }
+  return pathOrUri;
 }
 
 function downloadSubtitle(download: DownloadedTrack) {

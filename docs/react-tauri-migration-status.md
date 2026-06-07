@@ -10,6 +10,7 @@ Flutter was intentionally removed on 2026-06-05 after the user decided the React
 - React/Tauri uses React, TypeScript, Vite, Tauri, Rust commands, SQLite, and the OS/browser audio element.
 - The desktop app is macOS-first for now.
 - The packaged desktop app is configured as a single-instance app; a second launch focuses the existing window instead of starting another copy.
+- The packaged app is named `NekoFM.app`; old `NekoFM React.app` build copies were removed to avoid opening a stale app by mistake.
 - The React web shell uses NekoFM title/favicon branding instead of the default Vite/Tauri template.
 - The non-Tauri browser preview has a small read-only sample library/liked/playlist/download dataset so visual checks can be done without a live Tauri backend.
 - The non-Tauri browser preview accepts screenshot URLs such as `?previewScreen=liked` and `?previewAlbum=preview-album-1`.
@@ -32,6 +33,10 @@ Flutter was intentionally removed on 2026-06-05 after the user decided the React
 - Mini-player is fixed to the bottom of the app viewport/shell when visible, instead of being pushed to the bottom of long page content.
 - Player queue current row uses a distinct playing/equalizer-style icon.
 - Playback prefers verified local downloads before streaming from the server.
+- Local downloaded audio and local downloaded covers are converted through Tauri asset URLs before being given to the WebView.
+- Tauri asset protocol is enabled with home/app-data scope so downloaded files and covers can load from user-selected download folders.
+- Saved-profile loading now reports Keychain password load failures instead of silently returning an empty password.
+- Remembered passwords use Keychain first and an app-support fallback file if Keychain is unavailable or later cannot find the entry.
 - Playback fixes already ported/tightened:
   - Previous button restarts the real audio element on the first track.
   - Queue navigation while paused stays paused.
@@ -68,6 +73,8 @@ Run these with the packaged app, not only the browser preview.
   - Test both remembered credentials and current-session-only credentials.
   - Restart the app and confirm remembered credentials still load.
   - Turn remember-credentials off and confirm stale Keychain passwords are not reused.
+  - After the 2026-06-07 app rename from `NekoFM React` to `NekoFM`, do one fresh successful Test Connection with remember-credentials on before testing restart persistence.
+  - If Keychain reports no matching entry, re-enter the password once and Test Connection so the new fallback password store is written.
 - Online library:
   - Confirm albums load from Navidrome.
   - Open album detail pages.
@@ -144,7 +151,7 @@ On 2026-06-05, macOS allowed window ids to be listed through Swift/CoreGraphics 
 Packaged app path, relative to repo root:
 
 ```text
-desktop/src-tauri/target/release/bundle/macos/NekoFM React.app
+desktop/src-tauri/target/release/bundle/macos/NekoFM.app
 ```
 
 ## Working Rule
