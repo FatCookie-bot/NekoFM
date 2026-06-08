@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ComponentType } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import useEmblaCarousel from "embla-carousel-react";
+import type { EmblaCarouselType, EmblaOptionsType } from "embla-carousel";
 import {
   Album,
   ArrowLeft,
@@ -21,7 +23,6 @@ import {
   Play,
   RefreshCw,
   Repeat,
-  Settings,
   FolderOpen,
   Save,
   RotateCcw,
@@ -50,7 +51,6 @@ type DestinationId =
 type Destination = {
   id: DestinationId;
   label: string;
-  icon: ComponentType<{ size?: number; strokeWidth?: number }>;
 };
 
 type ServerConnectionResult = {
@@ -473,13 +473,36 @@ const previewPlaylistTracks: PlaylistTrack[] = [
   suffix: track.suffix,
 }));
 
+const primaryDestinations: Destination[] = [
+  { id: "liked", label: "Liked" },
+  { id: "playlists", label: "Playlist" },
+  { id: "library", label: "Library" },
+];
+
+const primaryDestinationIds = new Set<DestinationId>(
+  primaryDestinations.map((destination) => destination.id),
+);
+
+function primaryDestinationIndex(id: DestinationId) {
+  return primaryDestinations.findIndex((destination) => destination.id === id);
+}
+
+function isPrimaryDestination(id: DestinationId) {
+  return primaryDestinationIds.has(id);
+}
+
+const controlDestinations: Destination[] = [
+  { id: "settings", label: "Settings" },
+  { id: "downloads", label: "Downloads" },
+];
+
+const wheelNavigationCooldownMs = 420;
+const wheelNavigationThresholdPx = 28;
+
 const destinations: Destination[] = [
-  { id: "library", label: "Library", icon: Album },
-  { id: "player", label: "Player", icon: CirclePlay },
-  { id: "liked", label: "Liked", icon: Heart },
-  { id: "playlists", label: "Playlists", icon: ListMusic },
-  { id: "downloads", label: "Downloads", icon: Download },
-  { id: "settings", label: "Settings", icon: Settings },
+  ...primaryDestinations,
+  { id: "player", label: "Player" },
+  ...controlDestinations,
 ];
 
 function previewSearchParams() {
@@ -489,11 +512,25 @@ function previewSearchParams() {
   return new URLSearchParams(window.location.search);
 }
 
+function storedHomeDestination(): DestinationId | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  const stored = window.localStorage.getItem("nekofm.homePage");
+  return primaryDestinations.some((destination) => destination.id === stored)
+    ? (stored as DestinationId)
+    : null;
+}
+
+function initialHomeDestination(): DestinationId {
+  return storedHomeDestination() ?? "liked";
+}
+
 function initialPreviewDestination(): DestinationId {
   const requested = previewSearchParams().get("previewScreen");
   return destinations.some((destination) => destination.id === requested)
     ? (requested as DestinationId)
-    : "library";
+    : initialHomeDestination();
 }
 
 function initialPreviewPlayerState(): PlayerState {
@@ -680,6 +717,40 @@ function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const shouldPlayAfterSourceLoadRef = useRef(false);
   const [selectedId, setSelectedId] = useState<DestinationId>(initialPreviewDestination);
+  const [homeDestinationId, setHomeDestinationId] =
+    useState<DestinationId>(initialHomeDestination);
+  const selectedIdRef = useRef(selectedId);
+  const lastWheelNavigationAtRef = useRef(0);
+  const initialPrimaryIndexRef = useRef(
+    Math.max(
+      0,
+      primaryDestinationIndex(
+        isPrimaryDestination(selectedId) ? selectedId : homeDestinationId,
+      ),
+    ),
+  );
+  const [activePrimaryId, setActivePrimaryId] = useState<DestinationId>(
+    primaryDestinations[initialPrimaryIndexRef.current]?.id ?? "liked",
+  );
+  const primaryEmblaOptions = useMemo<EmblaOptionsType>(
+    () => ({
+      loop: true,
+      align: "center",
+      dragFree: false,
+      skipSnaps: false,
+      slidesToScroll: 1,
+      startIndex: initialPrimaryIndexRef.current,
+      watchDrag: (_emblaApi, event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          return true;
+        }
+        return !target.closest("[data-no-page-swipe], input[type='range'], [role='slider']");
+      },
+    }),
+    [],
+  );
+  const [primaryEmblaRef, primaryEmblaApi] = useEmblaCarousel(primaryEmblaOptions);
   const [player, setPlayer] = useState<PlayerState>(initialPreviewPlayerState);
   const [downloads, setDownloads] = useState<DownloadedTrack[]>([]);
   const [likedTracks, setLikedTracks] = useState<LikedTrack[]>([]);
@@ -700,6 +771,8 @@ function App() {
     downloads: 0,
     settings: 0,
   });
+  const [focusedPrimaryId, setFocusedPrimaryId] = useState<DestinationId | null>(null);
+  const selectedPrimaryId = isPrimaryDestination(selectedId) ? selectedId : null;
   const selected = destinations.find((item) => item.id === selectedId)!;
   const showMiniPlayer = selectedId !== "player";
   const currentTrack = player.queue[player.currentIndex] ?? null;
@@ -737,6 +810,109 @@ function App() {
       isCurrent = false;
     };
   }, []);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  const syncPrimarySelection = useCallback((emblaApi: EmblaCarouselType) => {
+    const destination = primaryDestinations[emblaApi.selectedScrollSnap()];
+    if (!destination) {
+      return;
+    }
+    setActivePrimaryId(destination.id);
+    if (!isPrimaryDestination(selectedIdRef.current)) {
+      return;
+    }
+    selectedIdRef.current = destination.id;
+    setSelectedId(destination.id);
+  }, []);
+
+  useEffect(() => {
+    if (!primaryEmblaApi) {
+      return;
+    }
+    const handleSelect = (emblaApi: EmblaCarouselType) => syncPrimarySelection(emblaApi);
+    primaryEmblaApi.on("select", handleSelect);
+    primaryEmblaApi.on("reInit", handleSelect);
+    syncPrimarySelection(primaryEmblaApi);
+    return () => {
+      primaryEmblaApi.off("select", handleSelect);
+      primaryEmblaApi.off("reInit", handleSelect);
+    };
+  }, [primaryEmblaApi, syncPrimarySelection]);
+
+  useEffect(() => {
+    if (!primaryEmblaApi || !isPrimaryDestination(selectedId)) {
+      return;
+    }
+    const selectedIndex = primaryDestinationIndex(selectedId);
+    if (selectedIndex < 0) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      if (primaryEmblaApi.selectedScrollSnap() !== selectedIndex) {
+        primaryEmblaApi.scrollTo(selectedIndex, true);
+      }
+    });
+  }, [primaryEmblaApi, selectedId]);
+
+  useEffect(() => {
+    if (!primaryEmblaApi) {
+      return;
+    }
+    const handleResize = () => primaryEmblaApi.reInit();
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("orientationchange", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleResize);
+    };
+  }, [primaryEmblaApi]);
+
+  useEffect(() => {
+    if (!primaryEmblaApi) {
+      return;
+    }
+    const rootNode = primaryEmblaApi.rootNode();
+    const handleWheel = (event: WheelEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("[data-no-page-swipe], input[type='range'], [role='slider']")
+      ) {
+        return;
+      }
+
+      const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX;
+      const verticalDelta = event.shiftKey ? event.deltaX : event.deltaY;
+      if (
+        Math.abs(horizontalDelta) < wheelNavigationThresholdPx ||
+        Math.abs(horizontalDelta) <= Math.abs(verticalDelta) * 1.15
+      ) {
+        return;
+      }
+
+      const now = performance.now();
+      if (now - lastWheelNavigationAtRef.current < wheelNavigationCooldownMs) {
+        event.preventDefault();
+        return;
+      }
+
+      lastWheelNavigationAtRef.current = now;
+      event.preventDefault();
+      if (horizontalDelta > 0) {
+        primaryEmblaApi.scrollNext();
+      } else {
+        primaryEmblaApi.scrollPrev();
+      }
+    };
+
+    rootNode.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => {
+      rootNode.removeEventListener("wheel", handleWheel, { capture: true });
+    };
+  }, [primaryEmblaApi]);
 
   useEffect(() => {
     reloadDownloads();
@@ -1323,35 +1499,70 @@ function App() {
     if (id === selectedId && id !== "player") {
       setResetKeys((current) => ({ ...current, [id]: current[id] + 1 }));
     }
+    if (isPrimaryDestination(id)) {
+      const selectedIndex = primaryDestinationIndex(id);
+      if (primaryEmblaApi && selectedIndex >= 0) {
+        setActivePrimaryId(id);
+        if (!isPrimaryDestination(selectedId)) {
+          selectedIdRef.current = id;
+          setSelectedId(id);
+          window.requestAnimationFrame(() => primaryEmblaApi.scrollTo(selectedIndex, true));
+          return;
+        }
+        primaryEmblaApi.scrollTo(selectedIndex);
+        return;
+      }
+    }
+    selectedIdRef.current = id;
     setSelectedId(id);
+  }
+
+  function selectHomeDestination(id: DestinationId) {
+    if (!primaryDestinations.some((destination) => destination.id === id)) {
+      return;
+    }
+    setHomeDestinationId(id);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("nekofm.homePage", id);
+    }
+  }
+
+  function openControlDestination() {
+    selectDestination("settings");
+  }
+
+  function renderShellPage(
+    id: DestinationId,
+    className: string,
+  ) {
+    return (
+      <div key={id} className={className}>
+        <PageForDestination
+          id={id}
+          resetKey={resetKeys[id]}
+          player={player}
+          playerActions={playerActions}
+          preferences={preferences}
+          preferenceActions={preferenceActions}
+          downloads={downloads}
+          activeDownloadTrackIds={activeDownloadTrackIds}
+          downloadActions={downloadActions}
+          likedTracks={likedTracks}
+          likedActions={likedActions}
+          playlists={playlists}
+          playlistTracksById={playlistTracksById}
+          playlistActions={playlistActions}
+          serverConnectionVersion={serverConnectionVersion}
+          homeDestinationId={homeDestinationId}
+          onHomeDestinationChange={selectHomeDestination}
+          onServerProfileChanged={() => setServerConnectionVersion((version) => version + 1)}
+        />
+      </div>
+    );
   }
 
   return (
     <div className="app-shell">
-      <aside className="navigation-rail" aria-label="Main navigation">
-        <AppMark />
-        <nav className="navigation-list">
-          {destinations.map((destination) => {
-            const Icon = destination.icon;
-            const isSelected = selectedId === destination.id;
-            return (
-              <button
-                key={destination.id}
-                className={`navigation-item ${isSelected ? "is-selected" : ""}`}
-                type="button"
-                aria-current={isSelected ? "page" : undefined}
-                onClick={() => selectDestination(destination.id)}
-              >
-                <span className="navigation-icon-pill" aria-hidden="true">
-                  <Icon size={22} strokeWidth={2.2} />
-                </span>
-                <span>{destination.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-      </aside>
-
       <main className="shell-main">
         <audio
           ref={audioRef}
@@ -1384,29 +1595,62 @@ function App() {
           aria-labelledby="page-title"
         >
           <header className="shell-header">
-            <AppMark />
+            <AppMark onPress={openControlDestination} />
+            <PrimaryPageNavigation
+              selectedId={activePrimaryId}
+              onSelect={selectDestination}
+            />
             <h1 id="page-title">{selected.label}</h1>
           </header>
 
-          <div className="content-frame">
-            <PageForDestination
-              id={selectedId}
-              resetKey={resetKeys[selectedId]}
-              player={player}
-              playerActions={playerActions}
-              preferences={preferences}
-              preferenceActions={preferenceActions}
-              downloads={downloads}
-              activeDownloadTrackIds={activeDownloadTrackIds}
-              downloadActions={downloadActions}
-              likedTracks={likedTracks}
-              likedActions={likedActions}
-              playlists={playlists}
-              playlistTracksById={playlistTracksById}
-              playlistActions={playlistActions}
-              serverConnectionVersion={serverConnectionVersion}
-              onServerProfileChanged={() => setServerConnectionVersion((version) => version + 1)}
-            />
+          <div
+            className={`primary-pager ${selectedPrimaryId ? "" : "is-shell-hidden"}`}
+            ref={primaryEmblaRef}
+            aria-label="Primary pages"
+          >
+            <div className="primary-pager-track">
+              {primaryDestinations.map((destination) => {
+                const isActivePrimaryPage = selectedPrimaryId === destination.id;
+                const shouldHideFromAccessibility =
+                  !isActivePrimaryPage && focusedPrimaryId !== destination.id;
+                return (
+                  <div
+                    className="primary-pager-slide"
+                    key={destination.id}
+                    aria-hidden={shouldHideFromAccessibility}
+                    inert={shouldHideFromAccessibility ? true : undefined}
+                    onFocusCapture={() => setFocusedPrimaryId(destination.id)}
+                    onBlurCapture={(event) => {
+                      if (!event.currentTarget.contains(event.relatedTarget)) {
+                        setFocusedPrimaryId((current) =>
+                          current === destination.id ? null : current,
+                        );
+                      }
+                    }}
+                  >
+                    <div className="content-frame primary-pager-frame">
+                      {renderShellPage(destination.id, "page-static-panel")}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          <div
+            className={`content-frame shell-secondary-frame ${selectedPrimaryId ? "is-shell-hidden" : ""}`}
+          >
+            {selectedPrimaryId ? null : (
+              <div className="secondary-page-stack">
+                {selectedId === "settings" || selectedId === "downloads" ? (
+                  <ControlSwitcher
+                    selectedId={selectedId}
+                    onSelect={selectDestination}
+                  />
+                ) : null}
+                {renderShellPage(selectedId, "page-static-panel")}
+              </div>
+            )}
           </div>
 
           {showMiniPlayer ? (
@@ -1438,6 +1682,8 @@ function PageForDestination({
   playlistTracksById,
   playlistActions,
   serverConnectionVersion,
+  homeDestinationId,
+  onHomeDestinationChange,
   onServerProfileChanged,
 }: {
   id: DestinationId;
@@ -1455,6 +1701,8 @@ function PageForDestination({
   playlistTracksById: Record<string, PlaylistTrack[]>;
   playlistActions: PlaylistActions;
   serverConnectionVersion: number;
+  homeDestinationId: DestinationId;
+  onHomeDestinationChange: (id: DestinationId) => void;
   onServerProfileChanged: () => void;
 }) {
   const key = `${id}-${resetKey}`;
@@ -1540,6 +1788,8 @@ function PageForDestination({
           key={key}
           preferences={preferences}
           preferenceActions={preferenceActions}
+          homeDestinationId={homeDestinationId}
+          onHomeDestinationChange={onHomeDestinationChange}
           onDownloadsChanged={async () => {
             await downloadActions.reloadDownloads();
           }}
@@ -1549,11 +1799,68 @@ function PageForDestination({
   }
 }
 
-function AppMark() {
+function AppMark({ onPress }: { onPress?: () => void }) {
   return (
-    <div className="app-mark" aria-label="NekoFM">
+    <button className="app-mark" type="button" aria-label="Open NekoFM controls" onClick={onPress}>
       <span aria-hidden="true">N</span>
-    </div>
+    </button>
+  );
+}
+
+function PrimaryPageNavigation({
+  selectedId,
+  onSelect,
+}: {
+  selectedId: DestinationId;
+  onSelect: (id: DestinationId) => void;
+}) {
+  return (
+    <nav className="primary-page-navigation" aria-label="Primary pages">
+      {primaryDestinations.map((destination) => {
+        const isSelected = selectedId === destination.id;
+        return (
+          <button
+            key={destination.id}
+            className={isSelected ? "is-selected" : ""}
+            type="button"
+            aria-current={isSelected ? "page" : undefined}
+            onClick={() => onSelect(destination.id)}
+          >
+            {destination.label}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+function ControlSwitcher({
+  selectedId,
+  onSelect,
+}: {
+  selectedId: DestinationId;
+  onSelect: (id: DestinationId) => void;
+}) {
+  return (
+    <nav
+      className="control-switcher"
+      aria-label="NekoFM controls"
+    >
+      {controlDestinations.map((destination) => {
+        const isSelected = selectedId === destination.id;
+        return (
+          <button
+            key={destination.id}
+            className={isSelected ? "is-selected" : ""}
+            type="button"
+            aria-current={isSelected ? "page" : undefined}
+            onClick={() => onSelect(destination.id)}
+          >
+            {destination.label}
+          </button>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -2728,6 +3035,7 @@ function PlaybackTimeline({
   return (
     <div className="playback-timeline">
       <input
+        data-no-page-swipe
         type="range"
         min={0}
         max={duration > 0 ? duration : 1}
@@ -3492,7 +3800,12 @@ function LikedPage({
               </button>
               <span className="track-actions">
                 {isReordering ? (
-                  <span className="reorder-handle" aria-label="Drag to reorder" title="Drag to reorder">
+                  <span
+                    className="reorder-handle"
+                    aria-label="Drag to reorder"
+                    title="Drag to reorder"
+                    data-no-page-swipe
+                  >
                     <GripVertical size={22} />
                   </span>
                 ) : (
@@ -4215,7 +4528,12 @@ function PlaylistsPage({
                   </button>
                   <span className="track-actions">
                     {isReordering ? (
-                      <span className="reorder-handle" aria-label="Drag to reorder" title="Drag to reorder">
+                      <span
+                        className="reorder-handle"
+                        aria-label="Drag to reorder"
+                        title="Drag to reorder"
+                        data-no-page-swipe
+                      >
                         <GripVertical size={22} />
                       </span>
                     ) : (
@@ -5222,11 +5540,15 @@ function DownloadsPage({
 function SettingsPlaceholder({
   preferences,
   preferenceActions,
+  homeDestinationId,
+  onHomeDestinationChange,
   onDownloadsChanged,
   onServerProfileChanged,
 }: {
   preferences: AppPreferences;
   preferenceActions: PreferenceActions;
+  homeDestinationId: DestinationId;
+  onHomeDestinationChange: (id: DestinationId) => void;
   onDownloadsChanged: () => Promise<void>;
   onServerProfileChanged: () => void;
 }) {
@@ -5558,6 +5880,24 @@ function SettingsPlaceholder({
 
   return (
     <div className="settings-placeholder">
+      <section className="settings-home-panel">
+        <h2>Home page</h2>
+        <p>Choose where NekoFM opens first.</p>
+        <div className="home-page-selector" role="radiogroup" aria-label="Home page">
+          {primaryDestinations.map((destination) => (
+            <button
+              key={destination.id}
+              type="button"
+              className={homeDestinationId === destination.id ? "is-selected" : ""}
+              role="radio"
+              aria-checked={homeDestinationId === destination.id}
+              onClick={() => onHomeDestinationChange(destination.id)}
+            >
+              {destination.label}
+            </button>
+          ))}
+        </div>
+      </section>
       <h2>Server connection</h2>
       <p>Connect directly to your own Navidrome or Subsonic-compatible server.</p>
       {isLoadingProfile ? (
@@ -5683,6 +6023,7 @@ function SettingsPlaceholder({
             </strong>
           </label>
           <input
+            data-no-page-swipe
             type="range"
             min={0}
             max={15}

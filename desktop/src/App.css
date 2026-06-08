@@ -6,35 +6,47 @@
   font-size: 16px;
   line-height: 1.45;
   font-weight: 400;
-  color: #dfe8e4;
-  background: #101413;
+  color: #e9f7f1;
+  background: #000;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  --surface: #101413;
-  --surface-high: #1d2421;
-  --surface-highest: #27302c;
-  --outline: #3f4b46;
-  --outline-soft: #303a36;
-  --primary: #87d9c0;
-  --primary-container: #005142;
-  --on-primary-container: #a8f3d8;
-  --on-surface: #dfe8e4;
-  --on-surface-variant: #bac8c2;
+  --surface: #000;
+  --surface-high: #050706;
+  --surface-highest: #0b1110;
+  --outline: #2e3a36;
+  --outline-soft: #151d1a;
+  --primary: #88f7ce;
+  --primary-container: #001d17;
+  --on-primary-container: #88f7ce;
+  --on-surface: #e9f7f1;
+  --on-surface-variant: #9baaa4;
   --error: #ffb4ab;
 }
 
 * {
   box-sizing: border-box;
+  border-radius: 0 !important;
 }
 
 body {
   margin: 0;
   min-width: 720px;
-  min-height: 100vh;
-  background: var(--surface);
+  width: 100vw;
+  height: 100vh;
+  background: #000;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+html,
+#root {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 .app-error-shell {
@@ -112,30 +124,28 @@ button:disabled {
 }
 
 .app-shell {
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: 136px minmax(0, 1fr);
-  background: var(--surface);
-}
-
-.navigation-rail {
-  border-right: 1px solid var(--outline-soft);
-  padding: 42px 0 22px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 52px;
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #000;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 .app-mark {
-  width: 44px;
-  height: 44px;
-  border-radius: 8px;
+  width: 58px;
+  height: 58px;
+  border: 1px solid var(--primary);
   display: grid;
   place-items: center;
-  background: var(--primary-container);
-  color: var(--on-primary-container);
+  background: #000;
+  color: var(--primary);
   flex: 0 0 auto;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    border-color 140ms ease;
 }
 
 .app-mark span {
@@ -144,78 +154,29 @@ button:disabled {
   font-weight: 800;
 }
 
-.navigation-list {
-  width: 100%;
-  display: grid;
-  gap: 18px;
-}
-
-.navigation-item {
-  min-height: 76px;
-  border: 0;
-  border-radius: 0;
-  padding: 0 10px;
-  display: grid;
-  place-items: center;
-  gap: 9px;
-  color: var(--on-surface-variant);
-  background: transparent;
-  cursor: pointer;
-}
-
-.navigation-icon-pill {
-  width: 64px;
-  height: 52px;
-  border-radius: 999px;
-  display: grid;
-  place-items: center;
-  color: inherit;
-  transition:
-    background 120ms ease,
-    color 120ms ease;
-}
-
-.navigation-icon-pill svg {
-  color: inherit;
-  width: 32px;
-  height: 32px;
-}
-
-.navigation-item span {
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.navigation-item:hover,
-.navigation-item:focus-visible {
-  color: var(--on-surface);
+.app-mark:hover,
+.app-mark:focus-visible {
+  background: var(--primary);
+  color: #000;
   outline: none;
-}
-
-.navigation-item:hover .navigation-icon-pill,
-.navigation-item:focus-visible .navigation-icon-pill {
-  background: rgba(135, 217, 192, 0.08);
-}
-
-.navigation-item.is-selected {
-  color: var(--primary);
-}
-
-.navigation-item.is-selected .navigation-icon-pill {
-  background: rgba(135, 217, 192, 0.18);
 }
 
 .shell-main {
   min-width: 0;
+  height: 100%;
   position: relative;
+  overflow: hidden;
 }
 
 .shell-page {
-  min-height: 100vh;
-  padding: 24px;
+  height: 100dvh;
+  padding: max(24px, env(safe-area-inset-top)) max(28px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(28px, env(safe-area-inset-left));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 24px;
+  background: #000;
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 .shell-page.has-mini-player {
@@ -223,25 +184,210 @@ button:disabled {
 }
 
 .shell-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(280px, 1fr) auto;
   align-items: center;
-  gap: 12px;
+  gap: 18px;
 }
 
 .shell-header h1 {
   margin: 0;
-  font-size: 2.05rem;
+  font-size: clamp(1.6rem, 2.5vw, 2.7rem);
   line-height: 1.2;
-  font-weight: 500;
+  font-weight: 700;
   letter-spacing: 0;
+  text-align: right;
+  text-transform: uppercase;
 }
 
 .content-frame {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  width: 100%;
   min-height: 0;
+  min-width: 0;
+  height: 100%;
+  justify-self: stretch;
+  align-self: stretch;
   border: 1px solid var(--outline);
-  border-radius: 8px;
   padding: 24px;
+  position: relative;
+  overflow: auto;
+  background: #000;
+  overscroll-behavior: contain;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y pinch-zoom;
+  -webkit-overflow-scrolling: touch;
+}
+
+.primary-pager {
+  grid-row: 2;
+  grid-column: 1 / -1;
+  width: 100%;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  justify-self: stretch;
+  align-self: stretch;
   overflow: hidden;
+  background: #000;
+  touch-action: pan-y pinch-zoom;
+  user-select: none;
+  cursor: grab;
+}
+
+.primary-pager:active {
+  cursor: grabbing;
+}
+
+.primary-pager.is-shell-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.content-frame.is-shell-hidden {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.shell-secondary-frame {
+  z-index: 1;
+}
+
+.shell-secondary-frame.is-shell-hidden {
+  z-index: 0;
+}
+
+.secondary-page-stack {
+  min-height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+}
+
+.primary-pager-track {
+  height: 100%;
+  display: flex;
+  backface-visibility: hidden;
+  touch-action: pan-y pinch-zoom;
+}
+
+.primary-pager-slide {
+  flex: 0 0 100%;
+  min-width: 0;
+  height: 100%;
+  transform: translate3d(0, 0, 0);
+}
+
+.primary-pager-frame {
+  width: 100%;
+  height: 100%;
+}
+
+.primary-pager img,
+.primary-pager a {
+  -webkit-user-drag: none;
+}
+
+.primary-page-navigation,
+.control-switcher {
+  min-width: 0;
+  border: 1px solid var(--outline);
+  display: grid;
+  background: #000;
+  touch-action: pan-y;
+  user-select: none;
+}
+
+.primary-page-navigation {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.control-switcher {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.primary-page-navigation button,
+.control-switcher button {
+  min-height: 58px;
+  border: 0;
+  border-right: 1px solid var(--outline-soft);
+  padding: 8px 12px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+  background: #000;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  text-align: left;
+  text-transform: uppercase;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.primary-page-navigation button:last-child,
+.control-switcher button:last-child {
+  border-right: 0;
+}
+
+.primary-page-navigation button:hover,
+.primary-page-navigation button:focus-visible,
+.control-switcher button:hover,
+.control-switcher button:focus-visible {
+  color: var(--on-surface);
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.primary-page-navigation button.is-selected,
+.control-switcher button.is-selected {
+  background: var(--primary);
+  color: #000;
+}
+
+.primary-page-navigation button,
+.control-switcher button {
+  font-size: clamp(1rem, 1.4vw, 1.25rem);
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.page-static-panel {
+  min-height: 100%;
+}
+
+.settings-home-panel {
+  border: 1px solid var(--outline);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.home-page-selector {
+  border: 1px solid var(--outline-soft);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.home-page-selector button {
+  min-height: 44px;
+  border: 0;
+  border-right: 1px solid var(--outline-soft);
+  background: #000;
+  color: var(--on-surface-variant);
+  cursor: pointer;
+  text-transform: uppercase;
+  font-weight: 800;
+}
+
+.home-page-selector button:last-child {
+  border-right: 0;
+}
+
+.home-page-selector button.is-selected {
+  background: var(--primary);
+  color: #000;
 }
 
 .page-stack {
@@ -2297,14 +2443,6 @@ button:disabled {
 @media (max-width: 719px) {
   body {
     min-width: 360px;
-  }
-
-  .app-shell {
-    grid-template-columns: 1fr;
-  }
-
-  .navigation-rail {
-    display: none;
   }
 
   .shell-page {
