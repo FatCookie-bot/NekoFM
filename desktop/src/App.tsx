@@ -496,7 +496,20 @@ const controlDestinations: Destination[] = [
   { id: "downloads", label: "Downloads" },
 ];
 
-const wheelNavigationCooldownMs = 420;
+const controlDestinationIds = new Set<DestinationId>(
+  controlDestinations.map((destination) => destination.id),
+);
+
+function controlDestinationIndex(id: DestinationId) {
+  return controlDestinations.findIndex((destination) => destination.id === id);
+}
+
+function isControlDestination(id: DestinationId) {
+  return controlDestinationIds.has(id);
+}
+
+const wheelNavigationLockMs = 85;
+const wheelNavigationStreamIdleMs = 65;
 const wheelNavigationThresholdPx = 28;
 
 const destinations: Destination[] = [
@@ -720,7 +733,19 @@ function App() {
   const [homeDestinationId, setHomeDestinationId] =
     useState<DestinationId>(initialHomeDestination);
   const selectedIdRef = useRef(selectedId);
-  const lastWheelNavigationAtRef = useRef(0);
+  const lastPrimaryDestinationIdRef = useRef<DestinationId>(
+    isPrimaryDestination(selectedId) ? selectedId : homeDestinationId,
+  );
+  const controlScrollFramesRef = useRef<Partial<Record<DestinationId, HTMLDivElement | null>>>({});
+  const pendingControlScrollResetRef = useRef(false);
+  const isWheelNavigationLockedRef = useRef(false);
+  const isWheelNavigationStreamActiveRef = useRef(false);
+  const wheelNavigationLockTimerRef = useRef<number | null>(null);
+  const wheelNavigationStreamIdleTimerRef = useRef<number | null>(null);
+  const isControlWheelNavigationLockedRef = useRef(false);
+  const isControlWheelNavigationStreamActiveRef = useRef(false);
+  const controlWheelNavigationLockTimerRef = useRef<number | null>(null);
+  const controlWheelNavigationStreamIdleTimerRef = useRef<number | null>(null);
   const initialPrimaryIndexRef = useRef(
     Math.max(
       0,
@@ -729,8 +754,13 @@ function App() {
       ),
     ),
   );
-  const [activePrimaryId, setActivePrimaryId] = useState<DestinationId>(
-    primaryDestinations[initialPrimaryIndexRef.current]?.id ?? "liked",
+  const initialControlIndexRef = useRef(
+    Math.max(
+      0,
+      controlDestinationIndex(
+        isControlDestination(selectedId) ? selectedId : "settings",
+      ),
+    ),
   );
   const primaryEmblaOptions = useMemo<EmblaOptionsType>(
     () => ({
@@ -751,6 +781,25 @@ function App() {
     [],
   );
   const [primaryEmblaRef, primaryEmblaApi] = useEmblaCarousel(primaryEmblaOptions);
+  const controlEmblaOptions = useMemo<EmblaOptionsType>(
+    () => ({
+      loop: true,
+      align: "center",
+      dragFree: false,
+      skipSnaps: false,
+      slidesToScroll: 1,
+      startIndex: initialControlIndexRef.current,
+      watchDrag: (_emblaApi, event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) {
+          return true;
+        }
+        return !target.closest("[data-no-page-swipe], input[type='range'], [role='slider']");
+      },
+    }),
+    [],
+  );
+  const [controlEmblaRef, controlEmblaApi] = useEmblaCarousel(controlEmblaOptions);
   const [player, setPlayer] = useState<PlayerState>(initialPreviewPlayerState);
   const [downloads, setDownloads] = useState<DownloadedTrack[]>([]);
   const [likedTracks, setLikedTracks] = useState<LikedTrack[]>([]);
@@ -773,6 +822,7 @@ function App() {
   });
   const [focusedPrimaryId, setFocusedPrimaryId] = useState<DestinationId | null>(null);
   const selectedPrimaryId = isPrimaryDestination(selectedId) ? selectedId : null;
+  const selectedControlId = isControlDestination(selectedId) ? selectedId : null;
   const selected = destinations.find((item) => item.id === selectedId)!;
   const showMiniPlayer = selectedId !== "player";
   const currentTrack = player.queue[player.currentIndex] ?? null;
@@ -815,12 +865,32 @@ function App() {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
 
+  useEffect(() => {
+    if (selectedPrimaryId) {
+      lastPrimaryDestinationIdRef.current = selectedPrimaryId;
+    }
+  }, [selectedPrimaryId]);
+
+  function resetControlScrollPositions() {
+    controlDestinations.forEach((destination) => {
+      const frame = controlScrollFramesRef.current[destination.id];
+      if (!frame) {
+        return;
+      }
+      frame.scrollTop = 0;
+      frame.scrollLeft = 0;
+      frame.querySelectorAll<HTMLElement>("*").forEach((node) => {
+        node.scrollTop = 0;
+        node.scrollLeft = 0;
+      });
+    });
+  }
+
   const syncPrimarySelection = useCallback((emblaApi: EmblaCarouselType) => {
     const destination = primaryDestinations[emblaApi.selectedScrollSnap()];
     if (!destination) {
       return;
     }
-    setActivePrimaryId(destination.id);
     if (!isPrimaryDestination(selectedIdRef.current)) {
       return;
     }
@@ -857,6 +927,57 @@ function App() {
     });
   }, [primaryEmblaApi, selectedId]);
 
+  const syncControlSelection = useCallback((emblaApi: EmblaCarouselType) => {
+    const destination = controlDestinations[emblaApi.selectedScrollSnap()];
+    if (!destination) {
+      return;
+    }
+    if (!isControlDestination(selectedIdRef.current)) {
+      return;
+    }
+    selectedIdRef.current = destination.id;
+    setSelectedId(destination.id);
+  }, []);
+
+  useEffect(() => {
+    if (!controlEmblaApi) {
+      return;
+    }
+    const handleSelect = (emblaApi: EmblaCarouselType) => syncControlSelection(emblaApi);
+    controlEmblaApi.on("select", handleSelect);
+    controlEmblaApi.on("reInit", handleSelect);
+    syncControlSelection(controlEmblaApi);
+    return () => {
+      controlEmblaApi.off("select", handleSelect);
+      controlEmblaApi.off("reInit", handleSelect);
+    };
+  }, [controlEmblaApi, syncControlSelection]);
+
+  useEffect(() => {
+    if (!controlEmblaApi || !isControlDestination(selectedId)) {
+      return;
+    }
+    const selectedIndex = controlDestinationIndex(selectedId);
+    if (selectedIndex < 0) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      if (controlEmblaApi.selectedScrollSnap() !== selectedIndex) {
+        controlEmblaApi.scrollTo(selectedIndex, true);
+      }
+    });
+  }, [controlEmblaApi, selectedId]);
+
+  useEffect(() => {
+    if (!selectedControlId || !pendingControlScrollResetRef.current) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      resetControlScrollPositions();
+      pendingControlScrollResetRef.current = false;
+    });
+  }, [selectedControlId]);
+
   useEffect(() => {
     if (!primaryEmblaApi) {
       return;
@@ -871,10 +992,45 @@ function App() {
   }, [primaryEmblaApi]);
 
   useEffect(() => {
+    if (!controlEmblaApi) {
+      return;
+    }
+    const handleResize = () => controlEmblaApi.reInit();
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("orientationchange", handleResize);
+    return () => {
+      window.removeEventListener("resize", handleResize);
+      window.removeEventListener("orientationchange", handleResize);
+    };
+  }, [controlEmblaApi]);
+
+  useEffect(() => {
     if (!primaryEmblaApi) {
       return;
     }
     const rootNode = primaryEmblaApi.rootNode();
+    const scheduleWheelNavigationLock = () => {
+      if (wheelNavigationLockTimerRef.current !== null) {
+        window.clearTimeout(wheelNavigationLockTimerRef.current);
+      }
+      isWheelNavigationLockedRef.current = true;
+      wheelNavigationLockTimerRef.current = window.setTimeout(() => {
+        isWheelNavigationLockedRef.current = false;
+        wheelNavigationLockTimerRef.current = null;
+      }, wheelNavigationLockMs);
+    };
+
+    const markWheelNavigationStreamActive = () => {
+      if (wheelNavigationStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(wheelNavigationStreamIdleTimerRef.current);
+      }
+      isWheelNavigationStreamActiveRef.current = true;
+      wheelNavigationStreamIdleTimerRef.current = window.setTimeout(() => {
+        isWheelNavigationStreamActiveRef.current = false;
+        wheelNavigationStreamIdleTimerRef.current = null;
+      }, wheelNavigationStreamIdleMs);
+    };
+
     const handleWheel = (event: WheelEvent) => {
       const target = event.target;
       if (
@@ -893,13 +1049,19 @@ function App() {
         return;
       }
 
-      const now = performance.now();
-      if (now - lastWheelNavigationAtRef.current < wheelNavigationCooldownMs) {
+      const wasWheelNavigationStreamActive = isWheelNavigationStreamActiveRef.current;
+      markWheelNavigationStreamActive();
+      if (isWheelNavigationLockedRef.current) {
         event.preventDefault();
         return;
       }
 
-      lastWheelNavigationAtRef.current = now;
+      if (wasWheelNavigationStreamActive) {
+        event.preventDefault();
+        return;
+      }
+
+      scheduleWheelNavigationLock();
       event.preventDefault();
       if (horizontalDelta > 0) {
         primaryEmblaApi.scrollNext();
@@ -911,8 +1073,100 @@ function App() {
     rootNode.addEventListener("wheel", handleWheel, { passive: false, capture: true });
     return () => {
       rootNode.removeEventListener("wheel", handleWheel, { capture: true });
+      if (wheelNavigationLockTimerRef.current !== null) {
+        window.clearTimeout(wheelNavigationLockTimerRef.current);
+        wheelNavigationLockTimerRef.current = null;
+      }
+      if (wheelNavigationStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(wheelNavigationStreamIdleTimerRef.current);
+        wheelNavigationStreamIdleTimerRef.current = null;
+      }
+      isWheelNavigationLockedRef.current = false;
+      isWheelNavigationStreamActiveRef.current = false;
     };
   }, [primaryEmblaApi]);
+
+  useEffect(() => {
+    if (!controlEmblaApi) {
+      return;
+    }
+    const rootNode = controlEmblaApi.rootNode();
+    const scheduleWheelNavigationLock = () => {
+      if (controlWheelNavigationLockTimerRef.current !== null) {
+        window.clearTimeout(controlWheelNavigationLockTimerRef.current);
+      }
+      isControlWheelNavigationLockedRef.current = true;
+      controlWheelNavigationLockTimerRef.current = window.setTimeout(() => {
+        isControlWheelNavigationLockedRef.current = false;
+        controlWheelNavigationLockTimerRef.current = null;
+      }, wheelNavigationLockMs);
+    };
+
+    const markWheelNavigationStreamActive = () => {
+      if (controlWheelNavigationStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(controlWheelNavigationStreamIdleTimerRef.current);
+      }
+      isControlWheelNavigationStreamActiveRef.current = true;
+      controlWheelNavigationStreamIdleTimerRef.current = window.setTimeout(() => {
+        isControlWheelNavigationStreamActiveRef.current = false;
+        controlWheelNavigationStreamIdleTimerRef.current = null;
+      }, wheelNavigationStreamIdleMs);
+    };
+
+    const handleWheel = (event: WheelEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("[data-no-page-swipe], input[type='range'], [role='slider']")
+      ) {
+        return;
+      }
+
+      const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX;
+      const verticalDelta = event.shiftKey ? event.deltaX : event.deltaY;
+      if (
+        Math.abs(horizontalDelta) < wheelNavigationThresholdPx ||
+        Math.abs(horizontalDelta) <= Math.abs(verticalDelta) * 1.15
+      ) {
+        return;
+      }
+
+      const wasWheelNavigationStreamActive = isControlWheelNavigationStreamActiveRef.current;
+      markWheelNavigationStreamActive();
+      if (isControlWheelNavigationLockedRef.current) {
+        event.preventDefault();
+        return;
+      }
+
+      if (wasWheelNavigationStreamActive) {
+        event.preventDefault();
+        return;
+      }
+
+      scheduleWheelNavigationLock();
+      event.preventDefault();
+      if (horizontalDelta > 0) {
+        controlEmblaApi.scrollNext();
+      } else {
+        controlEmblaApi.scrollPrev();
+      }
+    };
+
+    rootNode.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => {
+      rootNode.removeEventListener("wheel", handleWheel, { capture: true });
+      if (controlWheelNavigationLockTimerRef.current !== null) {
+        window.clearTimeout(controlWheelNavigationLockTimerRef.current);
+        controlWheelNavigationLockTimerRef.current = null;
+      }
+      if (controlWheelNavigationStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(controlWheelNavigationStreamIdleTimerRef.current);
+        controlWheelNavigationStreamIdleTimerRef.current = null;
+      }
+      isControlWheelNavigationLockedRef.current = false;
+      isControlWheelNavigationStreamActiveRef.current = false;
+    };
+  }, [controlEmblaApi]);
 
   useEffect(() => {
     reloadDownloads();
@@ -1502,7 +1756,6 @@ function App() {
     if (isPrimaryDestination(id)) {
       const selectedIndex = primaryDestinationIndex(id);
       if (primaryEmblaApi && selectedIndex >= 0) {
-        setActivePrimaryId(id);
         if (!isPrimaryDestination(selectedId)) {
           selectedIdRef.current = id;
           setSelectedId(id);
@@ -1510,6 +1763,19 @@ function App() {
           return;
         }
         primaryEmblaApi.scrollTo(selectedIndex);
+        return;
+      }
+    }
+    if (isControlDestination(id)) {
+      const selectedIndex = controlDestinationIndex(id);
+      if (controlEmblaApi && selectedIndex >= 0) {
+        if (!isControlDestination(selectedId)) {
+          selectedIdRef.current = id;
+          setSelectedId(id);
+          window.requestAnimationFrame(() => controlEmblaApi.scrollTo(selectedIndex, true));
+          return;
+        }
+        controlEmblaApi.scrollTo(selectedIndex);
         return;
       }
     }
@@ -1528,6 +1794,15 @@ function App() {
   }
 
   function openControlDestination() {
+    if (isControlDestination(selectedId)) {
+      resetControlScrollPositions();
+      selectDestination(lastPrimaryDestinationIdRef.current);
+      return;
+    }
+    if (isPrimaryDestination(selectedId)) {
+      lastPrimaryDestinationIdRef.current = selectedId;
+    }
+    pendingControlScrollResetRef.current = true;
     selectDestination("settings");
   }
 
@@ -1592,15 +1867,10 @@ function App() {
         />
         <section
           className={`shell-page ${showMiniPlayer ? "has-mini-player" : ""}`}
-          aria-labelledby="page-title"
+          aria-label={selected.label}
         >
           <header className="shell-header">
             <AppMark onPress={openControlDestination} />
-            <PrimaryPageNavigation
-              selectedId={activePrimaryId}
-              onSelect={selectDestination}
-            />
-            <h1 id="page-title">{selected.label}</h1>
           </header>
 
           <div
@@ -1638,17 +1908,61 @@ function App() {
           </div>
 
           <div
-            className={`content-frame shell-secondary-frame ${selectedPrimaryId ? "is-shell-hidden" : ""}`}
+            className={`content-frame shell-secondary-frame ${selectedPrimaryId ? "is-shell-hidden" : ""} ${selectedControlId ? "has-control-pager" : ""}`}
           >
             {selectedPrimaryId ? null : (
               <div className="secondary-page-stack">
-                {selectedId === "settings" || selectedId === "downloads" ? (
-                  <ControlSwitcher
-                    selectedId={selectedId}
-                    onSelect={selectDestination}
-                  />
-                ) : null}
-                {renderShellPage(selectedId, "page-static-panel")}
+                {selectedControlId ? (
+                  <div
+                    className="control-pager"
+                    ref={controlEmblaRef}
+                    aria-label="Settings and downloads pages"
+                  >
+                    <div className="control-pager-track">
+                      {controlDestinations.map((destination) => {
+                        const isActiveControlPage = selectedControlId === destination.id;
+                        return (
+                          <div
+                            className="control-pager-slide"
+                            key={destination.id}
+                            aria-hidden={!isActiveControlPage}
+                            inert={!isActiveControlPage ? true : undefined}
+                          >
+                            <div
+                              className="page-static-panel control-pager-frame"
+                              ref={(node) => {
+                                controlScrollFramesRef.current[destination.id] = node;
+                              }}
+                            >
+                              <PageForDestination
+                                id={destination.id}
+                                resetKey={resetKeys[destination.id]}
+                                player={player}
+                                playerActions={playerActions}
+                                preferences={preferences}
+                                preferenceActions={preferenceActions}
+                                downloads={downloads}
+                                activeDownloadTrackIds={activeDownloadTrackIds}
+                                downloadActions={downloadActions}
+                                likedTracks={likedTracks}
+                                likedActions={likedActions}
+                                playlists={playlists}
+                                playlistTracksById={playlistTracksById}
+                                playlistActions={playlistActions}
+                                serverConnectionVersion={serverConnectionVersion}
+                                homeDestinationId={homeDestinationId}
+                                onHomeDestinationChange={selectHomeDestination}
+                                onServerProfileChanged={() => setServerConnectionVersion((version) => version + 1)}
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : (
+                  renderShellPage(selectedId, "page-static-panel")
+                )}
               </div>
             )}
           </div>
@@ -1804,63 +2118,6 @@ function AppMark({ onPress }: { onPress?: () => void }) {
     <button className="app-mark" type="button" aria-label="Open NekoFM controls" onClick={onPress}>
       <span aria-hidden="true">N</span>
     </button>
-  );
-}
-
-function PrimaryPageNavigation({
-  selectedId,
-  onSelect,
-}: {
-  selectedId: DestinationId;
-  onSelect: (id: DestinationId) => void;
-}) {
-  return (
-    <nav className="primary-page-navigation" aria-label="Primary pages">
-      {primaryDestinations.map((destination) => {
-        const isSelected = selectedId === destination.id;
-        return (
-          <button
-            key={destination.id}
-            className={isSelected ? "is-selected" : ""}
-            type="button"
-            aria-current={isSelected ? "page" : undefined}
-            onClick={() => onSelect(destination.id)}
-          >
-            {destination.label}
-          </button>
-        );
-      })}
-    </nav>
-  );
-}
-
-function ControlSwitcher({
-  selectedId,
-  onSelect,
-}: {
-  selectedId: DestinationId;
-  onSelect: (id: DestinationId) => void;
-}) {
-  return (
-    <nav
-      className="control-switcher"
-      aria-label="NekoFM controls"
-    >
-      {controlDestinations.map((destination) => {
-        const isSelected = selectedId === destination.id;
-        return (
-          <button
-            key={destination.id}
-            className={isSelected ? "is-selected" : ""}
-            type="button"
-            aria-current={isSelected ? "page" : undefined}
-            onClick={() => onSelect(destination.id)}
-          >
-            {destination.label}
-          </button>
-        );
-      })}
-    </nav>
   );
 }
 
@@ -2185,7 +2442,7 @@ function LibraryPlaceholder({
 
   return (
     <div className="page-stack">
-      <label className="search-field">
+      <label className="search-field deferred-circular-control">
         <Search size={20} />
         <span>Search library</span>
         <input
@@ -2204,7 +2461,7 @@ function LibraryPlaceholder({
           </button>
         ) : null}
       </label>
-      <div className="library-toolbar">
+      <div className="library-toolbar deferred-circular-control">
         <button type="button" disabled={albums.length === 0 || isShuffling} onClick={shuffleAll}>
           {isShuffling ? <LoaderCircle className="spin-icon" size={18} /> : <Shuffle size={18} />}
           {isShuffling ? "Shuffling..." : "Shuffle all"}
@@ -3695,7 +3952,7 @@ function LikedPage({
             </p>
           </div>
         </div>
-        <div className="liked-actions">
+        <div className="liked-actions deferred-circular-control">
           {isReordering ? (
             <>
               <button type="button" onClick={cancelReorder}>
@@ -4394,6 +4651,7 @@ function PlaylistsPage({
             <p>{playlistSummary}</p>
           </span>
           <button
+            className="deferred-circular-control"
             type="button"
             aria-label="Rename playlist"
             title="Rename playlist"
@@ -4409,6 +4667,7 @@ function PlaylistsPage({
             <Pencil size={20} />
           </button>
           <button
+            className="deferred-circular-control"
             type="button"
             aria-label="Delete playlist"
             title="Delete playlist"
@@ -4423,7 +4682,7 @@ function PlaylistsPage({
             <Trash2 size={20} />
           </button>
         </div>
-        <div className="liked-actions">
+        <div className="liked-actions deferred-circular-control">
           {isReordering ? (
             <>
               <button type="button" onClick={cancelReorder}>
@@ -4591,7 +4850,7 @@ function PlaylistsPage({
 
   return (
     <div className="playlists-page">
-      <div className="playlist-create-row">
+      <div className="playlist-create-row deferred-circular-control">
         <button
           type="button"
           disabled={isWorking}

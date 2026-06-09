@@ -185,19 +185,8 @@ button:disabled {
 
 .shell-header {
   display: grid;
-  grid-template-columns: auto minmax(280px, 1fr) auto;
+  grid-template-columns: auto;
   align-items: center;
-  gap: 18px;
-}
-
-.shell-header h1 {
-  margin: 0;
-  font-size: clamp(1.6rem, 2.5vw, 2.7rem);
-  line-height: 1.2;
-  font-weight: 700;
-  letter-spacing: 0;
-  text-align: right;
-  text-transform: uppercase;
 }
 
 .content-frame {
@@ -258,11 +247,54 @@ button:disabled {
   z-index: 0;
 }
 
+.shell-secondary-frame.has-control-pager {
+  overflow: hidden;
+}
+
 .secondary-page-stack {
-  min-height: 100%;
+  min-height: 0;
+  height: 100%;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 16px;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.control-pager {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  touch-action: pan-y pinch-zoom;
+  user-select: none;
+  cursor: grab;
+}
+
+.control-pager:active {
+  cursor: grabbing;
+}
+
+.control-pager-track {
+  height: 100%;
+  display: flex;
+  backface-visibility: hidden;
+  touch-action: pan-y pinch-zoom;
+}
+
+.control-pager-slide {
+  flex: 0 0 100%;
+  min-width: 0;
+  height: 100%;
+  transform: translate3d(0, 0, 0);
+}
+
+.control-pager-frame {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: auto;
+  overscroll-behavior: contain;
+  overscroll-behavior-y: contain;
+  touch-action: pan-y pinch-zoom;
+  -webkit-overflow-scrolling: touch;
 }
 
 .primary-pager-track {
@@ -289,72 +321,12 @@ button:disabled {
   -webkit-user-drag: none;
 }
 
-.primary-page-navigation,
-.control-switcher {
-  min-width: 0;
-  border: 1px solid var(--outline);
-  display: grid;
-  background: #000;
-  touch-action: pan-y;
-  user-select: none;
-}
-
-.primary-page-navigation {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-}
-
-.control-switcher {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.primary-page-navigation button,
-.control-switcher button {
-  min-height: 58px;
-  border: 0;
-  border-right: 1px solid var(--outline-soft);
-  padding: 8px 12px;
-  display: grid;
-  align-content: center;
-  gap: 2px;
-  background: #000;
-  color: var(--on-surface-variant);
-  cursor: pointer;
-  text-align: left;
-  text-transform: uppercase;
-  transition:
-    background 140ms ease,
-    color 140ms ease;
-}
-
-.primary-page-navigation button:last-child,
-.control-switcher button:last-child {
-  border-right: 0;
-}
-
-.primary-page-navigation button:hover,
-.primary-page-navigation button:focus-visible,
-.control-switcher button:hover,
-.control-switcher button:focus-visible {
-  color: var(--on-surface);
-  outline: 2px solid var(--primary);
-  outline-offset: -2px;
-}
-
-.primary-page-navigation button.is-selected,
-.control-switcher button.is-selected {
-  background: var(--primary);
-  color: #000;
-}
-
-.primary-page-navigation button,
-.control-switcher button {
-  font-size: clamp(1rem, 1.4vw, 1.25rem);
-  font-weight: 800;
-  letter-spacing: 0;
-}
-
 .page-static-panel {
   min-height: 100%;
+}
+
+.deferred-circular-control {
+  display: none !important;
 }
 
 .settings-home-panel {
@@ -2124,8 +2096,6 @@ button:disabled {
 .settings-placeholder {
   max-width: 560px;
   width: min(560px, 100%);
-  height: 100%;
-  overflow: auto;
   padding-right: 4px;
 }
 
