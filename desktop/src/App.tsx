@@ -4176,6 +4176,7 @@ const circularScrollerDragPixelsPerSlot = 112;
 const circularScrollerSnapDelayMs = 130;
 const circularScrollerMaxWheelStep = 0.72;
 const circularScrollerDragThreshold = 5;
+const circularScrollerClickTransitionMs = 430;
 
 function circularScrollerPosition(slot: number) {
   if (slot <= -1) {
@@ -4243,6 +4244,12 @@ function CircularLikedScroller({
   const [isInteracting, setIsInteracting] = useState(false);
   const wheelPositionRef = useRef(activeIndex);
   const dragRef = useRef<{
+    clickTarget: {
+      itemIndex: number;
+      playIndex: number;
+      slot: number;
+    } | null;
+    hasPointerCapture: boolean;
     pointerId: number;
     sideFactor: number;
     startPosition: number;
@@ -4251,6 +4258,7 @@ function CircularLikedScroller({
   } | null>(null);
   const suppressClickRef = useRef(false);
   const snapTimerRef = useRef<number | null>(null);
+  const clickTimerRef = useRef<number | null>(null);
   const normalizedPosition =
     items.length > 0 ? ((wheelPosition % items.length) + items.length) % items.length : 0;
   const nearestIndex =
@@ -4280,6 +4288,9 @@ function CircularLikedScroller({
     return () => {
       if (snapTimerRef.current !== null) {
         window.clearTimeout(snapTimerRef.current);
+      }
+      if (clickTimerRef.current !== null) {
+        window.clearTimeout(clickTimerRef.current);
       }
     };
   }, []);
@@ -4311,6 +4322,28 @@ function CircularLikedScroller({
     }, circularScrollerSnapDelayMs);
   }
 
+  function moveToAndPlay(itemIndex: number, playIndex: number, slot: number) {
+    if (items.length === 0) {
+      return;
+    }
+    if (snapTimerRef.current !== null) {
+      window.clearTimeout(snapTimerRef.current);
+      snapTimerRef.current = null;
+    }
+    if (clickTimerRef.current !== null) {
+      window.clearTimeout(clickTimerRef.current);
+    }
+    const targetPosition = wheelPositionRef.current + slot;
+    wheelPositionRef.current = targetPosition;
+    setIsInteracting(false);
+    setWheelPosition(targetPosition);
+    onPlayIndex(playIndex);
+    clickTimerRef.current = window.setTimeout(() => {
+      clickTimerRef.current = null;
+      onActiveIndexChange(itemIndex);
+    }, circularScrollerClickTransitionMs);
+  }
+
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
     if (items.length < 2) {
       return;
@@ -4319,6 +4352,10 @@ function CircularLikedScroller({
       return;
     }
     event.preventDefault();
+    if (clickTimerRef.current !== null) {
+      window.clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
     const sideFactor = sideFactorFor(event.clientX, event.currentTarget);
     const step = Math.max(
       -circularScrollerMaxWheelStep,
@@ -4342,9 +4379,24 @@ function CircularLikedScroller({
       window.clearTimeout(snapTimerRef.current);
       snapTimerRef.current = null;
     }
-    event.currentTarget.setPointerCapture(event.pointerId);
+    if (clickTimerRef.current !== null) {
+      window.clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+    }
     suppressClickRef.current = false;
+    const clickedCard =
+      event.target instanceof Element
+        ? event.target.closest<HTMLElement>(".liked-circular-card")
+        : null;
+    const itemIndex = Number(clickedCard?.dataset.itemIndex);
+    const playIndex = Number(clickedCard?.dataset.playIndex);
+    const slot = Number(clickedCard?.dataset.slot);
     dragRef.current = {
+      clickTarget:
+        Number.isFinite(itemIndex) && Number.isFinite(playIndex) && Number.isFinite(slot)
+          ? { itemIndex, playIndex, slot }
+          : null,
+      hasPointerCapture: false,
       pointerId: event.pointerId,
       sideFactor: sideFactorFor(event.clientX, event.currentTarget),
       startPosition: wheelPositionRef.current,
@@ -4363,6 +4415,10 @@ function CircularLikedScroller({
     drag.totalMovement = Math.abs(movement);
     suppressClickRef.current =
       drag.totalMovement >= circularScrollerDragThreshold;
+    if (suppressClickRef.current && !drag.hasPointerCapture) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      drag.hasPointerCapture = true;
+    }
     const next =
       drag.startPosition +
       (movement * drag.sideFactor) / circularScrollerDragPixelsPerSlot;
@@ -4376,7 +4432,22 @@ function CircularLikedScroller({
       return;
     }
     dragRef.current = null;
-    event.currentTarget.releasePointerCapture(event.pointerId);
+    if (drag.hasPointerCapture) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!suppressClickRef.current && drag.clickTarget) {
+      suppressClickRef.current = true;
+      if (drag.clickTarget.itemIndex === nearestIndex) {
+        onPlayIndex(drag.clickTarget.playIndex);
+      } else {
+        moveToAndPlay(
+          drag.clickTarget.itemIndex,
+          drag.clickTarget.playIndex,
+          drag.clickTarget.slot,
+        );
+      }
+      return;
+    }
     snapToNearest(wheelPositionRef.current);
   }
 
@@ -4417,6 +4488,9 @@ function CircularLikedScroller({
             style={style}
             type="button"
             aria-label={`${item.track.title} by ${item.track.artist}`}
+            data-item-index={itemIndex}
+            data-play-index={item.index}
+            data-slot={slot}
             onClick={() => {
               if (suppressClickRef.current) {
                 suppressClickRef.current = false;
@@ -4425,7 +4499,7 @@ function CircularLikedScroller({
               if (isActive) {
                 onPlayIndex(item.index);
               } else {
-                onActiveIndexChange(itemIndex);
+                moveToAndPlay(itemIndex, item.index, slot);
               }
             }}
           >
