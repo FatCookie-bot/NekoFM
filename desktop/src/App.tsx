@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ComponentType } from "react";
+import type {
+  ComponentType,
+  CSSProperties,
+  PointerEvent as ReactPointerEvent,
+  WheelEvent as ReactWheelEvent,
+} from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import useEmblaCarousel from "embla-carousel-react";
 import type { EmblaCarouselType, EmblaOptionsType } from "embla-carousel";
@@ -775,7 +780,7 @@ function App() {
         if (!(target instanceof Element)) {
           return true;
         }
-        return !target.closest("[data-no-page-swipe], input[type='range'], [role='slider']");
+        return !target.closest("[data-no-page-swipe], [data-no-page-drag], input[type='range'], [role='slider']");
       },
     }),
     [],
@@ -794,7 +799,7 @@ function App() {
         if (!(target instanceof Element)) {
           return true;
         }
-        return !target.closest("[data-no-page-swipe], input[type='range'], [role='slider']");
+        return !target.closest("[data-no-page-swipe], [data-no-page-drag], input[type='range'], [role='slider']");
       },
     }),
     [],
@@ -3765,6 +3770,7 @@ function LikedPage({
   const [deleteDownloadDialog, setDeleteDownloadDialog] =
     useState<LocalDownloadDeleteDialogState | null>(null);
   const [reorderDraft, setReorderDraft] = useState<LikedTrack[]>([]);
+  const [circularActiveIndex, setCircularActiveIndex] = useState(0);
   const downloadsByTrackId = useMemo(
     () => new Map(downloads.map((download) => [download.trackId, download])),
     [downloads],
@@ -3775,6 +3781,32 @@ function LikedPage({
   const playableTracks = isOffline
     ? tracks.filter((track) => downloadsByTrackId.get(track.id)?.state === "complete")
     : tracks;
+
+  const circularItems = visibleLikedTracks.map((liked, index) => {
+    const download = downloadsByTrackId.get(liked.trackId) ?? null;
+    const isComplete = download?.state === "complete";
+    const track = likedToPlayableTrack(liked);
+    return {
+      coverUri: isComplete && download ? localOrRemoteCover(download) : liked.coverArtUri,
+      index,
+      isPlaying:
+        !isReordering &&
+        player.album?.id === "liked" &&
+        currentTrack?.id === liked.trackId,
+      isUnavailableOffline: isOffline && !isComplete,
+      liked,
+      track,
+    };
+  });
+
+  useEffect(() => {
+    setCircularActiveIndex((current) => {
+      if (visibleLikedTracks.length === 0) {
+        return 0;
+      }
+      return ((current % visibleLikedTracks.length) + visibleLikedTracks.length) % visibleLikedTracks.length;
+    });
+  }, [visibleLikedTracks.length]);
 
   useEffect(() => {
     let isCurrent = true;
@@ -3996,7 +4028,13 @@ function LikedPage({
           Navidrome is offline. Liked songs that are not downloaded will be skipped.
         </div>
       ) : null}
-      <div className="track-list liked-list">
+      <CircularLikedScroller
+        activeIndex={circularActiveIndex}
+        items={circularItems}
+        onActiveIndexChange={setCircularActiveIndex}
+        onPlayIndex={playLikedFrom}
+      />
+      <div className="track-list liked-list deferred-circular-control">
         {visibleLikedTracks.map((liked, index) => {
           const download = downloadsByTrackId.get(liked.trackId) ?? null;
           const isComplete = download?.state === "complete";
@@ -4117,6 +4155,285 @@ function LikedPage({
           onConfirm={confirmDeleteDownload}
         />
       ) : null}
+    </div>
+  );
+}
+
+type CircularLikedItem = {
+  coverUri?: string | null;
+  index: number;
+  isPlaying: boolean;
+  isUnavailableOffline: boolean;
+  liked: LikedTrack;
+  track: TrackModel;
+};
+
+const circularScrollerSlotCount = 8;
+const circularScrollerOpacity = [1, 0.82, 0.7, 0.6, 0.54, 0.5, 0.46, 0.42];
+const circularScrollerScale = [1.08, 0.98, 0.92, 0.88, 0.84, 0.8, 0.76, 0.72];
+const circularScrollerWheelPixelsPerSlot = 140;
+const circularScrollerDragPixelsPerSlot = 112;
+const circularScrollerSnapDelayMs = 130;
+const circularScrollerMaxWheelStep = 0.72;
+const circularScrollerDragThreshold = 5;
+
+function circularScrollerPosition(slot: number) {
+  if (slot <= -1) {
+    return {
+      opacity: 0,
+      scale: 1.48,
+    };
+  }
+  if (slot >= circularScrollerSlotCount) {
+    return {
+      opacity: 0,
+      scale: 0.64,
+    };
+  }
+  const lowerSlot = Math.floor(slot);
+  const upperSlot = lowerSlot + 1;
+  const progress = slot - lowerSlot;
+  const opacityAt = (position: number) => {
+    if (position === -1 || position === circularScrollerSlotCount) {
+      return 0;
+    }
+    return circularScrollerOpacity[position] ?? 0;
+  };
+  const scaleAt = (position: number) => {
+    if (position === -1) {
+      return 1.48;
+    }
+    if (position === circularScrollerSlotCount) {
+      return 0.64;
+    }
+    return circularScrollerScale[position] ?? 0.64;
+  };
+  const lowerOpacity = opacityAt(lowerSlot);
+  const upperOpacity = opacityAt(upperSlot);
+  const lowerScale = scaleAt(lowerSlot);
+  const upperScale = scaleAt(upperSlot);
+  return {
+    opacity: lowerOpacity + (upperOpacity - lowerOpacity) * progress,
+    scale: lowerScale + (upperScale - lowerScale) * progress,
+  };
+}
+
+function circularScrollerDistance(slot: number) {
+  // The outgoing song stays at spot one while it grows and fades toward the listener.
+  if (slot < 0) {
+    return 75;
+  }
+  // Slot nine is one full turn past spot one, so it enters from that same point
+  // and follows the coil continuously into spot eight.
+  return 75 + slot * 12.5;
+}
+
+function CircularLikedScroller({
+  activeIndex,
+  items,
+  onActiveIndexChange,
+  onPlayIndex,
+}: {
+  activeIndex: number;
+  items: CircularLikedItem[];
+  onActiveIndexChange: (index: number) => void;
+  onPlayIndex: (index: number) => void;
+}) {
+  const [wheelPosition, setWheelPosition] = useState(activeIndex);
+  const [isInteracting, setIsInteracting] = useState(false);
+  const wheelPositionRef = useRef(activeIndex);
+  const dragRef = useRef<{
+    pointerId: number;
+    sideFactor: number;
+    startPosition: number;
+    startY: number;
+    totalMovement: number;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
+  const snapTimerRef = useRef<number | null>(null);
+  const normalizedPosition =
+    items.length > 0 ? ((wheelPosition % items.length) + items.length) % items.length : 0;
+  const nearestIndex =
+    items.length > 0 ? Math.round(normalizedPosition) % items.length : 0;
+  const activeItem = items[nearestIndex] ?? items[0];
+  const wheelItems = items.flatMap((item, itemIndex) => {
+    let slot = itemIndex - normalizedPosition;
+    while (slot < -1) {
+      slot += items.length;
+    }
+    while (slot > items.length - 1) {
+      slot -= items.length;
+    }
+    return slot > circularScrollerSlotCount || slot < -1
+      ? []
+      : [{ item, itemIndex, slot }];
+  });
+
+  useEffect(() => {
+    if (!dragRef.current) {
+      wheelPositionRef.current = activeIndex;
+      setWheelPosition(activeIndex);
+    }
+  }, [activeIndex]);
+
+  useEffect(() => {
+    return () => {
+      if (snapTimerRef.current !== null) {
+        window.clearTimeout(snapTimerRef.current);
+      }
+    };
+  }, []);
+
+  function sideFactorFor(clientX: number, element: HTMLDivElement) {
+    const bounds = element.getBoundingClientRect();
+    return clientX < bounds.left + bounds.width / 2 ? -1 : 1;
+  }
+
+  function snapToNearest(position: number) {
+    if (items.length === 0) {
+      return;
+    }
+    const snappedPosition = Math.round(position);
+    const snappedIndex = ((snappedPosition % items.length) + items.length) % items.length;
+    wheelPositionRef.current = snappedPosition;
+    setWheelPosition(snappedPosition);
+    setIsInteracting(false);
+    onActiveIndexChange(snappedIndex);
+  }
+
+  function scheduleSnap(position: number) {
+    if (snapTimerRef.current !== null) {
+      window.clearTimeout(snapTimerRef.current);
+    }
+    snapTimerRef.current = window.setTimeout(() => {
+      snapTimerRef.current = null;
+      snapToNearest(position);
+    }, circularScrollerSnapDelayMs);
+  }
+
+  function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (items.length < 2) {
+      return;
+    }
+    if (Math.abs(event.deltaX) >= Math.abs(event.deltaY) || Math.abs(event.deltaY) < 0.25) {
+      return;
+    }
+    event.preventDefault();
+    const sideFactor = sideFactorFor(event.clientX, event.currentTarget);
+    const step = Math.max(
+      -circularScrollerMaxWheelStep,
+      Math.min(
+        circularScrollerMaxWheelStep,
+        event.deltaY / circularScrollerWheelPixelsPerSlot,
+      ),
+    );
+    const next = wheelPositionRef.current + step * sideFactor;
+    wheelPositionRef.current = next;
+    setWheelPosition(next);
+    setIsInteracting(true);
+    scheduleSnap(next);
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (items.length < 2 || event.button !== 0) {
+      return;
+    }
+    if (snapTimerRef.current !== null) {
+      window.clearTimeout(snapTimerRef.current);
+      snapTimerRef.current = null;
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    suppressClickRef.current = false;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      sideFactor: sideFactorFor(event.clientX, event.currentTarget),
+      startPosition: wheelPositionRef.current,
+      startY: event.clientY,
+      totalMovement: 0,
+    };
+    setIsInteracting(true);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    const movement = event.clientY - drag.startY;
+    drag.totalMovement = Math.abs(movement);
+    suppressClickRef.current =
+      drag.totalMovement >= circularScrollerDragThreshold;
+    const next =
+      drag.startPosition +
+      (movement * drag.sideFactor) / circularScrollerDragPixelsPerSlot;
+    wheelPositionRef.current = next;
+    setWheelPosition(next);
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    dragRef.current = null;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+    snapToNearest(wheelPositionRef.current);
+  }
+
+  if (!activeItem) {
+    return null;
+  }
+
+  return (
+    <div
+      className={`liked-circular-scroller ${isInteracting ? "is-interacting" : ""}`}
+      aria-label="Liked songs circular scroller"
+      onWheel={handleWheel}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      data-no-page-drag
+    >
+      <div className="liked-circular-center" aria-live="polite">
+        <strong>{activeItem.track.title}</strong>
+        <span>{activeItem.track.albumName || "Unknown album"}</span>
+        <span>{activeItem.track.artist || "Unknown artist"}</span>
+      </div>
+
+      {wheelItems.map(({ item, itemIndex, slot }) => {
+        const { opacity, scale } = circularScrollerPosition(slot);
+        const isActive = itemIndex === nearestIndex;
+        const style = {
+          "--circle-distance": `${circularScrollerDistance(slot)}%`,
+          "--circle-opacity": opacity,
+          "--circle-scale": scale,
+        } as CSSProperties;
+
+        return (
+          <button
+            key={item.liked.trackId}
+            className={`liked-circular-card ${isActive ? "is-active" : ""} ${slot <= -1 ? "is-exiting" : ""} ${slot >= circularScrollerSlotCount ? "is-entering" : ""} ${item.isPlaying ? "is-playing" : ""} ${item.isUnavailableOffline ? "is-unavailable" : ""}`}
+            style={style}
+            type="button"
+            aria-label={`${item.track.title} by ${item.track.artist}`}
+            onClick={() => {
+              if (suppressClickRef.current) {
+                suppressClickRef.current = false;
+                return;
+              }
+              if (isActive) {
+                onPlayIndex(item.index);
+              } else {
+                onActiveIndexChange(itemIndex);
+              }
+            }}
+          >
+            <AlbumArt imageUri={item.coverUri} label={`${item.track.title} cover art`} />
+            <span className="liked-circular-number">{item.index + 1}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }

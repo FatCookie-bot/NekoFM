@@ -322,6 +322,7 @@ button:disabled {
 }
 
 .page-static-panel {
+  height: 100%;
   min-height: 100%;
 }
 
@@ -907,6 +908,151 @@ button:disabled {
 .liked-actions button:focus-visible {
   background: rgba(135, 217, 192, 0.08);
   outline: none;
+}
+
+.liked-circular-scroller {
+  grid-row: 2;
+  min-height: 0;
+  height: 100%;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--outline-soft);
+  background:
+    radial-gradient(circle at center, rgba(135, 217, 192, 0.08), transparent 34%),
+    #000;
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+
+.liked-circular-scroller.is-interacting {
+  cursor: grabbing;
+}
+
+.liked-circular-center {
+  position: absolute;
+  z-index: 2;
+  top: 50%;
+  left: 50%;
+  width: min(280px, 42%);
+  display: grid;
+  gap: 4px;
+  color: var(--on-surface);
+  text-align: center;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.liked-circular-center strong,
+.liked-circular-center span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.liked-circular-center strong {
+  font-size: clamp(1.1rem, 2vw, 1.8rem);
+  font-weight: 700;
+}
+
+.liked-circular-center span {
+  color: var(--on-surface-variant);
+  font-size: clamp(0.88rem, 1.2vw, 1rem);
+}
+
+.liked-circular-card {
+  --circle-distance: 0%;
+  --circle-opacity: 1;
+  --circle-scale: 1;
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  width: clamp(72px, 8vw, 116px);
+  aspect-ratio: 1;
+  border: 0;
+  border-radius: 8px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--on-surface);
+  cursor: pointer;
+  offset-distance: var(--circle-distance);
+  offset-path: ellipse(38% 39% at 50% 50%);
+  offset-rotate: 0deg;
+  opacity: var(--circle-opacity);
+  transform: scale(var(--circle-scale));
+  will-change: offset-distance, opacity, transform;
+  transition:
+    offset-distance 420ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    opacity 420ms ease,
+    transform 420ms cubic-bezier(0.22, 0.72, 0.18, 1),
+    border-color 180ms ease,
+    background 180ms ease;
+}
+
+.liked-circular-card .album-art {
+  width: 100%;
+  height: 100%;
+  border: 1px solid var(--outline);
+  border-radius: 6px;
+  clip-path: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.42);
+}
+
+.liked-circular-card .album-art img {
+  border-radius: 6px;
+  -webkit-user-drag: none;
+}
+
+.liked-circular-card.is-active {
+  z-index: 3;
+}
+
+.liked-circular-card.is-active .album-art {
+  border-color: var(--primary);
+}
+
+.liked-circular-card.is-playing .album-art {
+  box-shadow: 0 0 0 2px rgba(135, 217, 192, 0.32);
+}
+
+.liked-circular-card.is-unavailable {
+  filter: grayscale(1);
+}
+
+.liked-circular-card.is-entering,
+.liked-circular-card.is-exiting {
+  pointer-events: none;
+}
+
+.liked-circular-scroller.is-interacting .liked-circular-card {
+  transition: none;
+}
+
+.liked-circular-card:hover .album-art,
+.liked-circular-card:focus-visible .album-art {
+  border-color: var(--primary);
+}
+
+.liked-circular-card:focus-visible {
+  outline: none;
+}
+
+.liked-circular-number {
+  position: absolute;
+  right: 8%;
+  bottom: 8%;
+  display: inline-block;
+  color: var(--primary);
+  text-shadow: 0 1px 4px #000, 0 1px 8px #000;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.liked-page > .deferred-circular-control {
+  display: none !important;
 }
 
 .liked-list .track-main {
