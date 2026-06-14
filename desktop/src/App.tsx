@@ -4175,6 +4175,9 @@ const circularScrollerWheelPixelsPerSlot = 140;
 const circularScrollerDragPixelsPerSlot = 112;
 const circularScrollerSnapDelayMs = 130;
 const circularScrollerMaxWheelStep = 0.72;
+const circularScrollerWheelBrakeDelta = 2.5;
+const circularScrollerWheelBrakeReleaseDelta = 10;
+const circularScrollerWheelStreamIdleMs = 120;
 const circularScrollerDragThreshold = 5;
 const circularScrollerClickTransitionMs = 430;
 
@@ -4259,6 +4262,8 @@ function CircularLikedScroller({
   const suppressClickRef = useRef(false);
   const snapTimerRef = useRef<number | null>(null);
   const clickTimerRef = useRef<number | null>(null);
+  const wheelBrakeRef = useRef(false);
+  const wheelStreamIdleTimerRef = useRef<number | null>(null);
   const normalizedPosition =
     items.length > 0 ? ((wheelPosition % items.length) + items.length) % items.length : 0;
   const nearestIndex =
@@ -4291,6 +4296,9 @@ function CircularLikedScroller({
       }
       if (clickTimerRef.current !== null) {
         window.clearTimeout(clickTimerRef.current);
+      }
+      if (wheelStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(wheelStreamIdleTimerRef.current);
       }
     };
   }, []);
@@ -4348,10 +4356,30 @@ function CircularLikedScroller({
     if (items.length < 2) {
       return;
     }
-    if (Math.abs(event.deltaX) >= Math.abs(event.deltaY) || Math.abs(event.deltaY) < 0.25) {
+    if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) {
       return;
     }
     event.preventDefault();
+    const verticalDelta = Math.abs(event.deltaY);
+    if (wheelStreamIdleTimerRef.current !== null) {
+      window.clearTimeout(wheelStreamIdleTimerRef.current);
+    }
+    wheelStreamIdleTimerRef.current = window.setTimeout(() => {
+      wheelBrakeRef.current = false;
+      wheelStreamIdleTimerRef.current = null;
+    }, circularScrollerWheelStreamIdleMs);
+    if (
+      wheelBrakeRef.current &&
+      verticalDelta < circularScrollerWheelBrakeReleaseDelta
+    ) {
+      return;
+    }
+    if (verticalDelta < circularScrollerWheelBrakeDelta) {
+      wheelBrakeRef.current = true;
+      snapToNearest(wheelPositionRef.current);
+      return;
+    }
+    wheelBrakeRef.current = false;
     if (clickTimerRef.current !== null) {
       window.clearTimeout(clickTimerRef.current);
       clickTimerRef.current = null;
