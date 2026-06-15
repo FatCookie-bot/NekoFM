@@ -3809,6 +3809,23 @@ function LikedPage({
   }, [visibleLikedTracks.length]);
 
   useEffect(() => {
+    if (isReordering || player.album?.id !== "liked" || !currentTrack) {
+      return;
+    }
+    const playingLikedIndex = visibleLikedTracks.findIndex(
+      (liked) => liked.trackId === currentTrack.id,
+    );
+    if (playingLikedIndex >= 0) {
+      setCircularActiveIndex(playingLikedIndex);
+    }
+  }, [
+    currentTrack?.id,
+    isReordering,
+    player.album?.id,
+    visibleLikedTracks,
+  ]);
+
+  useEffect(() => {
     let isCurrent = true;
 
     async function checkConnection() {
@@ -3838,15 +3855,15 @@ function LikedPage({
     return download?.state === "complete" ? downloadToTrack(download) : likedToTrack(liked);
   }
 
-  function playLikedFrom(index: number) {
+  function playLikedFrom(index: number, allowFirstPlayable = false) {
     const selectedTrackId = tracks[index]?.id;
     const selectedIndex = playableTracks.findIndex((track) => track.id === selectedTrackId);
-    const safeIndex = selectedIndex >= 0 ? selectedIndex : 0;
 
-    if (playableTracks.length === 0) {
+    if (playableTracks.length === 0 || (selectedIndex < 0 && !allowFirstPlayable)) {
       return;
     }
 
+    const safeIndex = selectedIndex >= 0 ? selectedIndex : 0;
     const selectedTrack = playableTracks[safeIndex];
     actions.playAlbum(
       {
@@ -3998,7 +4015,7 @@ function LikedPage({
             </>
           ) : (
             <>
-              <button type="button" disabled={playableTracks.length === 0} onClick={() => playLikedFrom(0)}>
+              <button type="button" disabled={playableTracks.length === 0} onClick={() => playLikedFrom(0, true)}>
                 <Play size={18} />
                 Play
               </button>
@@ -4077,7 +4094,8 @@ function LikedPage({
               <button
                 className="track-main"
                 type="button"
-                disabled={isUnavailableOffline && !isReordering}
+                aria-disabled={isUnavailableOffline && !isReordering}
+                title={isUnavailableOffline ? "Not downloaded and unavailable offline" : undefined}
                 onClick={() => selectOrSwap(index)}
               >
                 <AlbumArt imageUri={coverUri} label={`${liked.title} cover art`} />
@@ -4175,11 +4193,9 @@ const circularScrollerWheelPixelsPerSlot = 140;
 const circularScrollerDragPixelsPerSlot = 112;
 const circularScrollerSnapDelayMs = 130;
 const circularScrollerMaxWheelStep = 0.72;
-const circularScrollerWheelBrakeDelta = 2.5;
-const circularScrollerWheelBrakeReleaseDelta = 10;
-const circularScrollerWheelStreamIdleMs = 120;
 const circularScrollerDragThreshold = 5;
 const circularScrollerClickTransitionMs = 430;
+const circularScrollerPlaybackTransitionMs = 420;
 
 function circularScrollerPosition(slot: number) {
   if (slot <= -1) {
@@ -4262,8 +4278,7 @@ function CircularLikedScroller({
   const suppressClickRef = useRef(false);
   const snapTimerRef = useRef<number | null>(null);
   const clickTimerRef = useRef<number | null>(null);
-  const wheelBrakeRef = useRef(false);
-  const wheelStreamIdleTimerRef = useRef<number | null>(null);
+  const playbackAnimationFrameRef = useRef<number | null>(null);
   const normalizedPosition =
     items.length > 0 ? ((wheelPosition % items.length) + items.length) % items.length : 0;
   const nearestIndex =
@@ -4281,13 +4296,49 @@ function CircularLikedScroller({
       ? []
       : [{ item, itemIndex, slot }];
   });
+  const centerItems = wheelItems.filter(({ slot }) => slot > -1 && slot < 1);
 
   useEffect(() => {
-    if (!dragRef.current) {
-      wheelPositionRef.current = activeIndex;
-      setWheelPosition(activeIndex);
+    if (!dragRef.current && items.length > 0) {
+      const currentPosition = wheelPositionRef.current;
+      const currentNormalized =
+        ((currentPosition % items.length) + items.length) % items.length;
+      let distance = activeIndex - currentNormalized;
+      if (distance > items.length / 2) {
+        distance -= items.length;
+      } else if (distance < -items.length / 2) {
+        distance += items.length;
+      }
+      const nextPosition = currentPosition + distance;
+      if (Math.abs(distance) < 0.001) {
+        return;
+      }
+      if (playbackAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(playbackAnimationFrameRef.current);
+      }
+      const startedAt = performance.now();
+      setIsInteracting(true);
+      const animate = (now: number) => {
+        const progress = Math.min(
+          1,
+          (now - startedAt) / circularScrollerPlaybackTransitionMs,
+        );
+        const easedProgress = 1 - Math.pow(1 - progress, 3);
+        const position = currentPosition + distance * easedProgress;
+        wheelPositionRef.current = position;
+        setWheelPosition(position);
+        if (progress < 1) {
+          playbackAnimationFrameRef.current = window.requestAnimationFrame(animate);
+          return;
+        }
+        playbackAnimationFrameRef.current = null;
+        wheelPositionRef.current = nextPosition;
+        setWheelPosition(nextPosition);
+        setIsInteracting(false);
+      };
+      playbackAnimationFrameRef.current = window.requestAnimationFrame(animate);
     }
-  }, [activeIndex]);
+  }, [activeIndex, items.length]);
 
   useEffect(() => {
     return () => {
@@ -4297,11 +4348,18 @@ function CircularLikedScroller({
       if (clickTimerRef.current !== null) {
         window.clearTimeout(clickTimerRef.current);
       }
-      if (wheelStreamIdleTimerRef.current !== null) {
-        window.clearTimeout(wheelStreamIdleTimerRef.current);
+      if (playbackAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(playbackAnimationFrameRef.current);
       }
     };
   }, []);
+
+  function cancelPlaybackAnimation() {
+    if (playbackAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(playbackAnimationFrameRef.current);
+      playbackAnimationFrameRef.current = null;
+    }
+  }
 
   function sideFactorFor(clientX: number, element: HTMLDivElement) {
     const bounds = element.getBoundingClientRect();
@@ -4356,30 +4414,11 @@ function CircularLikedScroller({
     if (items.length < 2) {
       return;
     }
-    if (Math.abs(event.deltaX) >= Math.abs(event.deltaY)) {
+    if (Math.abs(event.deltaX) >= Math.abs(event.deltaY) || Math.abs(event.deltaY) < 0.25) {
       return;
     }
     event.preventDefault();
-    const verticalDelta = Math.abs(event.deltaY);
-    if (wheelStreamIdleTimerRef.current !== null) {
-      window.clearTimeout(wheelStreamIdleTimerRef.current);
-    }
-    wheelStreamIdleTimerRef.current = window.setTimeout(() => {
-      wheelBrakeRef.current = false;
-      wheelStreamIdleTimerRef.current = null;
-    }, circularScrollerWheelStreamIdleMs);
-    if (
-      wheelBrakeRef.current &&
-      verticalDelta < circularScrollerWheelBrakeReleaseDelta
-    ) {
-      return;
-    }
-    if (verticalDelta < circularScrollerWheelBrakeDelta) {
-      wheelBrakeRef.current = true;
-      snapToNearest(wheelPositionRef.current);
-      return;
-    }
-    wheelBrakeRef.current = false;
+    cancelPlaybackAnimation();
     if (clickTimerRef.current !== null) {
       window.clearTimeout(clickTimerRef.current);
       clickTimerRef.current = null;
@@ -4403,6 +4442,7 @@ function CircularLikedScroller({
     if (items.length < 2 || event.button !== 0) {
       return;
     }
+    cancelPlaybackAnimation();
     if (snapTimerRef.current !== null) {
       window.clearTimeout(snapTimerRef.current);
       snapTimerRef.current = null;
@@ -4495,18 +4535,38 @@ function CircularLikedScroller({
       data-no-page-drag
     >
       <div className="liked-circular-center" aria-live="polite">
-        <strong>{activeItem.track.title}</strong>
-        <span>{activeItem.track.albumName || "Unknown album"}</span>
-        <span>{activeItem.track.artist || "Unknown artist"}</span>
+        {centerItems.map(({ item, slot }) => {
+          const centerVisibility = 1 - Math.abs(slot);
+          const metadataVisibility =
+            centerVisibility * centerVisibility * centerVisibility;
+          const style = {
+            "--center-opacity": centerVisibility,
+            "--center-metadata-opacity": metadataVisibility,
+            "--center-title-offset": `${slot >= 0 ? slot * -92 : slot * -22}px`,
+          } as CSSProperties;
+          return (
+            <span
+              className="liked-circular-center-item"
+              key={item.liked.trackId}
+              style={style}
+            >
+              <strong>{item.track.title}</strong>
+              <span>{item.track.albumName || "Unknown album"}</span>
+              <span>{item.track.artist || "Unknown artist"}</span>
+            </span>
+          );
+        })}
       </div>
 
       {wheelItems.map(({ item, itemIndex, slot }) => {
         const { opacity, scale } = circularScrollerPosition(slot);
         const isActive = itemIndex === nearestIndex;
+        const orbitTitleOpacity = slot < 0 ? 0 : Math.min(1, slot);
         const style = {
           "--circle-distance": `${circularScrollerDistance(slot)}%`,
           "--circle-opacity": opacity,
           "--circle-scale": scale,
+          "--orbit-title-opacity": orbitTitleOpacity,
         } as CSSProperties;
 
         return (
@@ -4519,6 +4579,7 @@ function CircularLikedScroller({
             data-item-index={itemIndex}
             data-play-index={item.index}
             data-slot={slot}
+            title={item.isUnavailableOffline ? "Not downloaded and unavailable offline" : undefined}
             onClick={() => {
               if (suppressClickRef.current) {
                 suppressClickRef.current = false;
@@ -4532,7 +4593,13 @@ function CircularLikedScroller({
             }}
           >
             <AlbumArt imageUri={item.coverUri} label={`${item.track.title} cover art`} />
+            {item.isUnavailableOffline ? (
+              <span className="liked-circular-unavailable" aria-hidden="true">
+                <ShieldAlert size={24} />
+              </span>
+            ) : null}
             <span className="liked-circular-number">{item.index + 1}</span>
+            <span className="liked-circular-song-name">{item.track.title}</span>
           </button>
         );
       })}
@@ -4949,17 +5016,18 @@ function PlaylistsPage({
         : playlistTrackToTrack(track);
     }
 
-    function playFrom(index: number) {
+    function playFrom(index: number, allowFirstPlayable = false) {
       const selectedEntryId = tracks[index]?.entryId;
       const queueSource = isOffline ? playableTracks : tracks;
       const queue = queueSource.map(playlistToPlayableTrack);
       if (queue.length === 0) {
         return;
       }
-      const safeIndex = Math.max(
-        0,
-        queue.findIndex((track) => track.queueKey === selectedEntryId),
-      );
+      const selectedIndex = queue.findIndex((track) => track.queueKey === selectedEntryId);
+      if (selectedIndex < 0 && !allowFirstPlayable) {
+        return;
+      }
+      const safeIndex = selectedIndex >= 0 ? selectedIndex : 0;
       const selectedTrack = queue[safeIndex];
       playerActions.playAlbum(
         {
@@ -5115,7 +5183,7 @@ function PlaylistsPage({
             </>
           ) : (
             <>
-              <button type="button" disabled={playableTracks.length === 0} onClick={() => playFrom(0)}>
+              <button type="button" disabled={playableTracks.length === 0} onClick={() => playFrom(0, true)}>
                 <Play size={18} />
                 Play
               </button>
@@ -5188,7 +5256,8 @@ function PlaylistsPage({
                   <button
                     className="track-main"
                     type="button"
-                    disabled={isUnavailableOffline && !isReordering}
+                    aria-disabled={isUnavailableOffline && !isReordering}
+                    title={isUnavailableOffline ? "Not downloaded and unavailable offline" : undefined}
                     onClick={() => selectOrSwap(index)}
                   >
                     <AlbumArt imageUri={coverUri} label={`${track.title} cover art`} />

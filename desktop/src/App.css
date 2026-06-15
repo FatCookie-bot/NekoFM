@@ -935,35 +935,50 @@ button:disabled {
   top: 50%;
   left: 50%;
   width: min(280px, 42%);
-  display: grid;
-  gap: 4px;
+  height: 120px;
   color: var(--on-surface);
   text-align: center;
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
 
-.liked-circular-center strong,
-.liked-circular-center span {
+.liked-circular-center-item {
+  --center-opacity: 1;
+  --center-metadata-opacity: 1;
+  --center-title-offset: 0px;
+  position: absolute;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  opacity: var(--center-opacity);
+  transform: translateY(var(--center-title-offset));
+  will-change: opacity, transform;
+}
+
+.liked-circular-center-item strong,
+.liked-circular-center-item > span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.liked-circular-center strong {
+.liked-circular-center-item strong {
   font-size: clamp(1.1rem, 2vw, 1.8rem);
   font-weight: 700;
 }
 
-.liked-circular-center span {
+.liked-circular-center-item > span {
   color: var(--on-surface-variant);
   font-size: clamp(0.88rem, 1.2vw, 1rem);
+  opacity: var(--center-metadata-opacity);
 }
 
 .liked-circular-card {
   --circle-distance: 0%;
   --circle-opacity: 1;
   --circle-scale: 1;
+  --orbit-title-opacity: 1;
   position: absolute;
   z-index: 1;
   top: 0;
@@ -1022,6 +1037,24 @@ button:disabled {
   filter: grayscale(1);
 }
 
+.liked-circular-unavailable {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.56);
+  color: var(--primary);
+  opacity: 0;
+  transition: opacity 160ms ease;
+  pointer-events: none;
+}
+
+.liked-circular-card.is-unavailable:hover .liked-circular-unavailable,
+.liked-circular-card.is-unavailable:focus-visible .liked-circular-unavailable {
+  opacity: 1;
+}
+
 .liked-circular-card.is-entering,
 .liked-circular-card.is-exiting {
   pointer-events: none;
@@ -1051,6 +1084,26 @@ button:disabled {
   font-weight: 700;
 }
 
+.liked-circular-song-name {
+  position: absolute;
+  top: calc(100% + 7px);
+  left: 50%;
+  width: 150%;
+  overflow: hidden;
+  color: var(--on-surface);
+  font-size: clamp(0.68rem, 0.9vw, 0.82rem);
+  font-weight: 600;
+  line-height: 1.15;
+  text-align: center;
+  text-overflow: ellipsis;
+  text-shadow: 0 1px 4px #000, 0 1px 8px #000;
+  white-space: nowrap;
+  opacity: var(--orbit-title-opacity);
+  transform: translateX(-50%);
+  transition: opacity 180ms linear;
+  pointer-events: none;
+}
+
 .liked-page > .deferred-circular-control {
   display: none !important;
 }
@@ -1064,7 +1117,7 @@ button:disabled {
 }
 
 .liked-row.is-unavailable .track-main {
-  cursor: default;
+  cursor: not-allowed;
 }
 
 .liked-row.is-playing .track-copy strong {
