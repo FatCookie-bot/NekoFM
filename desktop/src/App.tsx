@@ -6980,7 +6980,17 @@ function MiniPlayer({
   actions: PlayerActions;
   onOpenPlayer: () => void;
 }) {
+  const singleTapTimerRef = useRef<number | null>(null);
   const currentTrack = player.queue[player.currentIndex] ?? null;
+
+  useEffect(() => {
+    return () => {
+      if (singleTapTimerRef.current !== null) {
+        window.clearTimeout(singleTapTimerRef.current);
+      }
+    };
+  }, []);
+
   if (!currentTrack || !player.album) {
     return null;
   }
@@ -6990,11 +7000,29 @@ function MiniPlayer({
       ? 0
       : Math.min(1, Math.max(0, player.positionSeconds / player.durationSeconds));
 
+  function handleMiniPlayerTap() {
+    if (singleTapTimerRef.current !== null) {
+      window.clearTimeout(singleTapTimerRef.current);
+      singleTapTimerRef.current = null;
+      actions.toggleShuffle();
+      return;
+    }
+    singleTapTimerRef.current = window.setTimeout(() => {
+      singleTapTimerRef.current = null;
+      onOpenPlayer();
+    }, 240);
+  }
+
   return (
-    <div className="mini-player">
+    <div className={`mini-player ${player.isShuffleEnabled ? "is-shuffling" : ""}`}>
       <div className="mini-progress" style={{ transform: `scaleX(${progress})` }} />
       <div className="mini-body">
-        <button className="mini-open" type="button" onClick={onOpenPlayer}>
+        <button
+          className="mini-open"
+          type="button"
+          aria-label={player.isShuffleEnabled ? "Open player. Shuffle is on" : "Open player"}
+          onClick={handleMiniPlayerTap}
+        >
           <AlbumArt
             imageUri={currentTrack.coverArtUri ?? player.album.coverArtUri}
             label={`${player.album.name} cover art`}
@@ -7015,6 +7043,12 @@ function MiniPlayer({
               ) : null}
             </span>
           </span>
+          {player.isShuffleEnabled ? (
+            <span className="mini-shuffle-state" aria-label="Shuffle on">
+              <Shuffle size={16} />
+              Shuffle
+            </span>
+          ) : null}
         </button>
         <div className="mini-controls">
           <button
