@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ComponentType,
   CSSProperties,
+  KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
   WheelEvent as ReactWheelEvent,
 } from "react";
@@ -20,6 +21,7 @@ import {
   Download,
   GripVertical,
   Heart,
+  HeartOff,
   ListMusic,
   ListPlus,
   Music2,
@@ -27,7 +29,6 @@ import {
   Pencil,
   Play,
   RefreshCw,
-  Repeat,
   FolderOpen,
   Save,
   RotateCcw,
@@ -41,6 +42,7 @@ import {
   SkipBack,
   SkipForward,
   Trash2,
+  Wrench,
   X,
 } from "lucide-react";
 import "./App.css";
@@ -67,6 +69,12 @@ type ServerScanResult = {
   isScanning: boolean;
   scannedCount: number;
   message: string;
+};
+
+type LibraryCleanupResult = {
+  checkedCount: number;
+  removedLikedCount: number;
+  removedPlaylistEntryCount: number;
 };
 
 type SavedServerProfile = {
@@ -260,7 +268,6 @@ type PlayerState = {
   currentIndex: number;
   isPlaying: boolean;
   isLoading: boolean;
-  isRepeatEnabled: boolean;
   isShuffleEnabled: boolean;
   skipUnavailable: boolean;
   positionSeconds: number;
@@ -269,6 +276,9 @@ type PlayerState = {
   source: "local" | "stream" | null;
   sourceByQueueKey: Record<string, "local" | "stream">;
   baseQueueKeys: string[];
+  // Queue keys of "play next" entries that have not played yet, in the order
+  // they were added. They stay pinned directly after the current track.
+  manualQueueKeys: string[];
   playbackRequestId: number;
 };
 
@@ -286,7 +296,7 @@ type PlayerActions = {
   seekNext: () => void;
   seekTo: (seconds: number) => void;
   seekToQueueIndex: (index: number) => void;
-  toggleRepeat: () => void;
+  queueTrackNext: (track: TrackModel) => void;
   toggleShuffle: () => void;
 };
 
@@ -332,7 +342,6 @@ const emptyPlayerState: PlayerState = {
   currentIndex: 0,
   isPlaying: false,
   isLoading: false,
-  isRepeatEnabled: false,
   isShuffleEnabled: false,
   skipUnavailable: false,
   positionSeconds: 0,
@@ -341,6 +350,7 @@ const emptyPlayerState: PlayerState = {
   source: null,
   sourceByQueueKey: {},
   baseQueueKeys: [],
+  manualQueueKeys: [],
   playbackRequestId: 0,
 };
 
@@ -516,12 +526,51 @@ function isControlDestination(id: DestinationId) {
 const wheelNavigationLockMs = 85;
 const wheelNavigationStreamIdleMs = 65;
 const wheelNavigationThresholdPx = 28;
+const playerReturnMomentumIdleMs = 180;
 
 const destinations: Destination[] = [
   ...primaryDestinations,
   { id: "player", label: "Player" },
   ...controlDestinations,
 ];
+
+let previewSilentAudioUriCache: string | null = null;
+
+// A 60 second silent WAV so preview playback behaves like a real song instead
+// of ending (and auto-advancing the queue) immediately.
+function previewSilentAudioUri() {
+  if (previewSilentAudioUriCache) {
+    return previewSilentAudioUriCache;
+  }
+  const sampleRate = 8000;
+  const seconds = 60;
+  const dataLength = sampleRate * seconds;
+  const buffer = new Uint8Array(44 + dataLength);
+  const view = new DataView(buffer.buffer);
+  const writeAscii = (offset: number, text: string) => {
+    for (let index = 0; index < text.length; index += 1) {
+      buffer[offset + index] = text.charCodeAt(index);
+    }
+  };
+  writeAscii(0, "RIFF");
+  view.setUint32(4, 36 + dataLength, true);
+  writeAscii(8, "WAVE");
+  writeAscii(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate, true); // byte rate (8-bit mono)
+  view.setUint16(32, 1, true); // block align
+  view.setUint16(34, 8, true); // bits per sample
+  writeAscii(36, "data");
+  view.setUint32(40, dataLength, true);
+  buffer.fill(128, 44); // 8-bit silence midpoint
+  previewSilentAudioUriCache = URL.createObjectURL(
+    new Blob([buffer], { type: "audio/wav" }),
+  );
+  return previewSilentAudioUriCache;
+}
 
 function previewSearchParams() {
   if (typeof window === "undefined" || hasTauriRuntime()) {
@@ -638,7 +687,7 @@ async function invokeCommand<T>(
     }
     if (command === "get_playback_source") {
       return {
-        uri: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=",
+        uri: previewSilentAudioUri(),
         source: "stream",
       } as T;
     }
@@ -697,6 +746,20 @@ async function invokeCommand<T>(
         message: "Server scan started.",
       } as T;
     }
+    if (command === "get_server_scan_status") {
+      return {
+        isScanning: false,
+        scannedCount: 0,
+        message: "Server scan finished.",
+      } as T;
+    }
+    if (command === "cleanup_missing_server_tracks") {
+      return {
+        checkedCount: 0,
+        removedLikedCount: 0,
+        removedPlaylistEntryCount: 0,
+      } as T;
+    }
     if (command === "load_downloaded_album_details") {
       return previewAlbumDetails.map((detail) => ({
         album: detail.album,
@@ -738,6 +801,7 @@ function App() {
   const [homeDestinationId, setHomeDestinationId] =
     useState<DestinationId>(initialHomeDestination);
   const selectedIdRef = useRef(selectedId);
+  const shellPageRef = useRef<HTMLElement | null>(null);
   const lastPrimaryDestinationIdRef = useRef<DestinationId>(
     isPrimaryDestination(selectedId) ? selectedId : homeDestinationId,
   );
@@ -751,6 +815,12 @@ function App() {
   const isControlWheelNavigationStreamActiveRef = useRef(false);
   const controlWheelNavigationLockTimerRef = useRef<number | null>(null);
   const controlWheelNavigationStreamIdleTimerRef = useRef<number | null>(null);
+  const playerReturnWheelStreamActiveRef = useRef(false);
+  const playerReturnWheelStreamIdleTimerRef = useRef<number | null>(null);
+  const isPlayerReturnMomentumBlockedRef = useRef(false);
+  const playerReturnMomentumIdleTimerRef = useRef<number | null>(null);
+  const isPlayerOpenMomentumBlockedRef = useRef(false);
+  const playerOpenMomentumIdleTimerRef = useRef<number | null>(null);
   const initialPrimaryIndexRef = useRef(
     Math.max(
       0,
@@ -860,6 +930,57 @@ function App() {
     }
 
     loadPreferences();
+
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!hasTauriRuntime()) {
+      return;
+    }
+    let isCurrent = true;
+
+    // Quick library check on every launch: quietly ask the server to scan its
+    // music folder, wait for the scan to settle, drop liked/playlist entries
+    // whose tracks no longer exist anywhere, then refresh server-backed pages.
+    async function quickLibraryCheck() {
+      try {
+        await invokeCommand<ServerScanResult>("start_server_scan");
+        for (let attempt = 0; attempt < 30 && isCurrent; attempt += 1) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1000));
+          const status = await invokeCommand<ServerScanResult>("get_server_scan_status");
+          if (!status.isScanning) {
+            break;
+          }
+        }
+        if (!isCurrent) {
+          return;
+        }
+        try {
+          const cleanup = await invokeCommand<LibraryCleanupResult>(
+            "cleanup_missing_server_tracks",
+          );
+          if (isCurrent && cleanup.removedLikedCount > 0) {
+            await reloadLikedTracks();
+          }
+          if (isCurrent && cleanup.removedPlaylistEntryCount > 0) {
+            setPlaylistTracksById({});
+            await reloadPlaylists();
+          }
+        } catch {
+          // Cleanup is best-effort; a failed lookup must never block startup.
+        }
+        if (isCurrent) {
+          setServerConnectionVersion((version) => version + 1);
+        }
+      } catch {
+        // Offline or no saved server profile — skip the check silently.
+      }
+    }
+
+    quickLibraryCheck();
 
     return () => {
       isCurrent = false;
@@ -1013,7 +1134,114 @@ function App() {
     if (!primaryEmblaApi) {
       return;
     }
-    const rootNode = primaryEmblaApi.rootNode();
+    // Song lists with their own drag handling (the circular scroller) report
+    // horizontal swipes through this event so they still switch primary tabs.
+    const handleTabSwipe = (event: Event) => {
+      const detail = (event as CustomEvent<PrimaryTabSwipeDetail>).detail;
+      if (!detail || !isPrimaryDestination(selectedIdRef.current)) {
+        return;
+      }
+      if (detail.direction > 0) {
+        primaryEmblaApi.scrollNext();
+      } else {
+        primaryEmblaApi.scrollPrev();
+      }
+    };
+    window.addEventListener(primaryTabSwipeEventName, handleTabSwipe);
+    return () => {
+      window.removeEventListener(primaryTabSwipeEventName, handleTabSwipe);
+    };
+  }, [primaryEmblaApi]);
+
+  useEffect(() => {
+    const rootNode = shellPageRef.current;
+    if (!rootNode || selectedId !== "player") {
+      return;
+    }
+
+    const handleWheel = (event: WheelEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Element &&
+        target.closest("[data-no-page-swipe], input[type='range'], [role='slider']")
+      ) {
+        return;
+      }
+      const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX;
+      const verticalDelta = event.shiftKey ? event.deltaX : event.deltaY;
+      if (
+        Math.abs(horizontalDelta) < wheelNavigationThresholdPx ||
+        Math.abs(horizontalDelta) <= Math.abs(verticalDelta) * 1.15
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      if (playerReturnWheelStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(playerReturnWheelStreamIdleTimerRef.current);
+      }
+      playerReturnWheelStreamIdleTimerRef.current = window.setTimeout(() => {
+        playerReturnWheelStreamActiveRef.current = false;
+        playerReturnWheelStreamIdleTimerRef.current = null;
+      }, wheelNavigationStreamIdleMs);
+      if (playerReturnWheelStreamActiveRef.current) {
+        return;
+      }
+      playerReturnWheelStreamActiveRef.current = true;
+      isPlayerReturnMomentumBlockedRef.current = true;
+      if (playerReturnMomentumIdleTimerRef.current !== null) {
+        window.clearTimeout(playerReturnMomentumIdleTimerRef.current);
+      }
+      playerReturnMomentumIdleTimerRef.current = window.setTimeout(() => {
+        isPlayerReturnMomentumBlockedRef.current = false;
+        playerReturnMomentumIdleTimerRef.current = null;
+      }, playerReturnMomentumIdleMs);
+      selectDestination(lastPrimaryDestinationIdRef.current);
+    };
+
+    rootNode.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => {
+      rootNode.removeEventListener("wheel", handleWheel, { capture: true });
+      if (playerReturnWheelStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(playerReturnWheelStreamIdleTimerRef.current);
+        playerReturnWheelStreamIdleTimerRef.current = null;
+      }
+      playerReturnWheelStreamActiveRef.current = false;
+    };
+  }, [selectedId]);
+
+  useEffect(() => {
+    // Swallow the trackpad momentum tail right after the mini player opens the
+    // full player, so the leftover swipe impulse cannot scroll the queue list.
+    const handleWheel = (event: WheelEvent) => {
+      if (!isPlayerOpenMomentumBlockedRef.current) {
+        return;
+      }
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (playerOpenMomentumIdleTimerRef.current !== null) {
+        window.clearTimeout(playerOpenMomentumIdleTimerRef.current);
+      }
+      playerOpenMomentumIdleTimerRef.current = window.setTimeout(() => {
+        isPlayerOpenMomentumBlockedRef.current = false;
+        playerOpenMomentumIdleTimerRef.current = null;
+      }, playerReturnMomentumIdleMs);
+    };
+    window.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    return () => {
+      window.removeEventListener("wheel", handleWheel, { capture: true });
+      if (playerOpenMomentumIdleTimerRef.current !== null) {
+        window.clearTimeout(playerOpenMomentumIdleTimerRef.current);
+        playerOpenMomentumIdleTimerRef.current = null;
+      }
+      isPlayerOpenMomentumBlockedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!primaryEmblaApi) {
+      return;
+    }
     const scheduleWheelNavigationLock = () => {
       if (wheelNavigationLockTimerRef.current !== null) {
         window.clearTimeout(wheelNavigationLockTimerRef.current);
@@ -1037,12 +1265,39 @@ function App() {
     };
 
     const handleWheel = (event: WheelEvent) => {
-      const target = event.target;
-      if (
-        target instanceof Element &&
-        target.closest("[data-no-page-swipe], input[type='range'], [role='slider']")
-      ) {
+      if (!isPrimaryDestination(selectedIdRef.current)) {
         return;
+      }
+      if (isPlayerReturnMomentumBlockedRef.current) {
+        event.preventDefault();
+        if (playerReturnMomentumIdleTimerRef.current !== null) {
+          window.clearTimeout(playerReturnMomentumIdleTimerRef.current);
+        }
+        playerReturnMomentumIdleTimerRef.current = window.setTimeout(() => {
+          isPlayerReturnMomentumBlockedRef.current = false;
+          playerReturnMomentumIdleTimerRef.current = null;
+        }, playerReturnMomentumIdleMs);
+        return;
+      }
+      const target = event.target;
+      if (target instanceof Element) {
+        // Chrome latches wheel streams to the element where the gesture began;
+        // after the player page unmounts, events fall back to body/html. Accept
+        // those plus anything inside the shell, so tab swipes keep working
+        // without first moving the cursor.
+        const shellNode = shellPageRef.current;
+        const isLatchedFallback =
+          target === document.body || target === document.documentElement;
+        if (!isLatchedFallback && (!shellNode || !shellNode.contains(target))) {
+          return;
+        }
+        if (
+          target.closest(
+            "[data-no-page-swipe], input[type='range'], [role='slider'], .mini-player",
+          )
+        ) {
+          return;
+        }
       }
 
       const horizontalDelta = event.shiftKey ? event.deltaY : event.deltaX;
@@ -1075,9 +1330,9 @@ function App() {
       }
     };
 
-    rootNode.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    window.addEventListener("wheel", handleWheel, { passive: false, capture: true });
     return () => {
-      rootNode.removeEventListener("wheel", handleWheel, { capture: true });
+      window.removeEventListener("wheel", handleWheel, { capture: true });
       if (wheelNavigationLockTimerRef.current !== null) {
         window.clearTimeout(wheelNavigationLockTimerRef.current);
         wheelNavigationLockTimerRef.current = null;
@@ -1086,6 +1341,11 @@ function App() {
         window.clearTimeout(wheelNavigationStreamIdleTimerRef.current);
         wheelNavigationStreamIdleTimerRef.current = null;
       }
+      if (playerReturnMomentumIdleTimerRef.current !== null) {
+        window.clearTimeout(playerReturnMomentumIdleTimerRef.current);
+        playerReturnMomentumIdleTimerRef.current = null;
+      }
+      isPlayerReturnMomentumBlockedRef.current = false;
       isWheelNavigationLockedRef.current = false;
       isWheelNavigationStreamActiveRef.current = false;
     };
@@ -1298,6 +1558,7 @@ function App() {
             source: null,
             sourceByQueueKey: nextSourceByQueueKey,
             baseQueueKeys: current.baseQueueKeys.filter((key) => key !== failedKey),
+            manualQueueKeys: current.manualQueueKeys.filter((key) => key !== failedKey),
             playbackRequestId: current.playbackRequestId + 1,
           };
         });
@@ -1333,6 +1594,7 @@ function App() {
         source: null,
         sourceByQueueKey: sourceMapForTracks(tracks, downloads),
         baseQueueKeys: tracks.map(queueTrackKey),
+        manualQueueKeys: [],
         playbackRequestId: current.playbackRequestId + 1,
       }));
     },
@@ -1363,6 +1625,9 @@ function App() {
           currentIndex: nextIndex,
           durationSeconds: nextTrack.durationSeconds,
           baseQueueKeys: tracks.map(queueTrackKey),
+          manualQueueKeys: current.manualQueueKeys.filter((key) =>
+            tracks.some((track) => queueTrackKey(track) === key),
+          ),
           sourceByQueueKey: {
             ...sourceMapForTracks(tracks, downloads),
             ...Object.fromEntries(
@@ -1436,6 +1701,9 @@ function App() {
           baseQueueKeys: current.baseQueueKeys.filter((key) =>
             keptQueue.some((track) => queueTrackKey(track) === key),
           ),
+          manualQueueKeys: current.manualQueueKeys.filter((key) =>
+            keptQueue.some((track) => queueTrackKey(track) === key),
+          ),
           sourceByQueueKey: nextSourceByQueueKey,
         };
       });
@@ -1474,19 +1742,44 @@ function App() {
       }
 
       setPlayer((current) => {
-        if (current.currentIndex <= 0) {
+        if (current.queue.length === 0) {
           audio.currentTime = 0;
           return { ...current, positionSeconds: 0 };
         }
+        // Leaving a "play next" entry removes it, restoring the original order.
+        const currentKey = queueTrackKey(current.queue[current.currentIndex]);
+        const isManualCurrent = current.manualQueueKeys.includes(currentKey);
+        const queue = isManualCurrent
+          ? current.queue.filter((_, index) => index !== current.currentIndex)
+          : current.queue;
+        const manualQueueKeys = isManualCurrent
+          ? current.manualQueueKeys.filter((key) => key !== currentKey)
+          : current.manualQueueKeys;
+        if (queue.length === 0) {
+          return { ...current, queue, manualQueueKeys, currentIndex: 0, isPlaying: false };
+        }
+        if (current.currentIndex <= 0) {
+          // The queue loops both ways: previous on the first track wraps to the last.
+          return {
+            ...current,
+            queue,
+            manualQueueKeys,
+            currentIndex: queue.length - 1,
+            positionSeconds: 0,
+            playbackRequestId: current.playbackRequestId + 1,
+          };
+        }
         return {
           ...current,
+          queue,
+          manualQueueKeys,
           currentIndex: current.currentIndex - 1,
           positionSeconds: 0,
         };
       });
     },
     seekNext() {
-      advanceQueue("manual");
+      advanceQueue();
     },
     seekTo(seconds) {
       const audio = audioRef.current;
@@ -1507,19 +1800,86 @@ function App() {
         audio.currentTime = 0;
       }
       setPlayer((current) => {
+        if (index < 0 || index >= current.queue.length) {
+          return current;
+        }
+        // Jumping away from a "play next" entry removes it from the queue.
+        const currentKey = queueTrackKey(current.queue[current.currentIndex]);
+        const isManualCurrent =
+          index !== current.currentIndex &&
+          current.manualQueueKeys.includes(currentKey);
+        const queue = isManualCurrent
+          ? current.queue.filter((_, position) => position !== current.currentIndex)
+          : current.queue;
+        const manualQueueKeys = isManualCurrent
+          ? current.manualQueueKeys.filter((key) => key !== currentKey)
+          : current.manualQueueKeys;
+        const targetIndex =
+          isManualCurrent && index > current.currentIndex ? index - 1 : index;
         return {
           ...current,
-          currentIndex: index,
+          queue,
+          manualQueueKeys,
+          currentIndex: Math.min(targetIndex, queue.length - 1),
           positionSeconds: 0,
           playbackRequestId: current.playbackRequestId + 1,
         };
       });
     },
-    toggleRepeat() {
-      setPlayer((current) => ({
-        ...current,
-        isRepeatEnabled: !current.isRepeatEnabled,
-      }));
+    queueTrackNext(track) {
+      queueInsertCounter += 1;
+      const entry: TrackModel = {
+        ...track,
+        queueKey: `queued-${queueInsertCounter}-${track.id}`,
+      };
+      setPlayer((current) => {
+        if (current.queue.length === 0 || !current.album) {
+          // Nothing is playing: surface the song in the player, paused at 0:00.
+          return {
+            ...current,
+            album: {
+              id: "liked",
+              name: "Liked",
+              artist: track.artist,
+              songCount: 1,
+              durationSeconds: track.durationSeconds,
+              coverArtId: track.coverArtId,
+              coverArtUri: track.coverArtUri,
+            },
+            queue: [entry],
+            currentIndex: 0,
+            isPlaying: false,
+            isLoading: false,
+            positionSeconds: 0,
+            durationSeconds: track.durationSeconds,
+            errorMessage: null,
+            source: null,
+            sourceByQueueKey: sourceMapForTracks([entry], downloads),
+            baseQueueKeys: [queueTrackKey(entry)],
+            manualQueueKeys: [],
+          };
+        }
+        // Spotify-style: new entries go after the current track and after any
+        // still-pending "play next" entries, in the order they were added.
+        const insertAt = Math.min(
+          current.currentIndex + 1 + current.manualQueueKeys.length,
+          current.queue.length,
+        );
+        const queue = [...current.queue];
+        queue.splice(insertAt, 0, entry);
+        return {
+          ...current,
+          album: current.album
+            ? { ...current.album, songCount: queue.length }
+            : current.album,
+          queue,
+          manualQueueKeys: [...current.manualQueueKeys, queueTrackKey(entry)],
+          sourceByQueueKey: {
+            ...current.sourceByQueueKey,
+            ...sourceMapForTracks([entry], downloads),
+          },
+        };
+      });
     },
     toggleShuffle() {
       setPlayer((current) => {
@@ -1529,22 +1889,32 @@ function App() {
 
         const currentTrack = current.queue[current.currentIndex];
         const currentKey = queueTrackKey(currentTrack);
+        const manualKeySet = new Set(current.manualQueueKeys);
+        // Pending "play next" entries stay pinned right after the current
+        // track no matter how the rest of the queue is (un)shuffled.
+        const pinnedManualEntries = current.queue.filter(
+          (track) =>
+            manualKeySet.has(queueTrackKey(track)) &&
+            queueTrackKey(track) !== currentKey,
+        );
+        const regularQueue = current.queue.filter(
+          (track) =>
+            queueTrackKey(track) !== currentKey &&
+            !manualKeySet.has(queueTrackKey(track)),
+        );
         const queueByKey = new Map(
-          current.queue.map((track) => [queueTrackKey(track), track]),
+          regularQueue.map((track) => [queueTrackKey(track), track]),
         );
         const orderedUpcoming = current.baseQueueKeys
-          .filter((key) => key !== currentKey)
+          .filter((key) => key !== currentKey && !manualKeySet.has(key))
           .map((key) => queueByKey.get(key))
           .filter((track): track is TrackModel => Boolean(track));
-        const fallbackUpcoming = current.queue.filter(
-          (_, index) => index !== current.currentIndex,
-        );
-        const upcoming = orderedUpcoming.length === fallbackUpcoming.length
+        const upcoming = orderedUpcoming.length === regularQueue.length
           ? orderedUpcoming
-          : fallbackUpcoming;
+          : regularQueue;
         const nextQueue = current.isShuffleEnabled
-          ? [currentTrack, ...upcoming]
-          : [currentTrack, ...shuffleItems(upcoming)];
+          ? [currentTrack, ...pinnedManualEntries, ...upcoming]
+          : [currentTrack, ...pinnedManualEntries, ...shuffleItems(upcoming)];
 
         return {
           ...current,
@@ -1727,30 +2097,49 @@ function App() {
     setPlaylists(loaded);
   }
 
-  function advanceQueue(reason: "ended" | "manual") {
+  function advanceQueue() {
     setPlayer((current) => {
       if (current.queue.length === 0) {
         return current;
       }
-      if (current.currentIndex + 1 < current.queue.length) {
+      // Leaving a "play next" entry removes it, restoring the original order.
+      const currentKey = queueTrackKey(current.queue[current.currentIndex]);
+      const isManualCurrent = current.manualQueueKeys.includes(currentKey);
+      const queue = isManualCurrent
+        ? current.queue.filter((_, index) => index !== current.currentIndex)
+        : current.queue;
+      const manualQueueKeys = isManualCurrent
+        ? current.manualQueueKeys.filter((key) => key !== currentKey)
+        : current.manualQueueKeys;
+      if (queue.length === 0) {
+        return { ...current, queue, manualQueueKeys, currentIndex: 0, isPlaying: false };
+      }
+      const nextIndex = isManualCurrent
+        ? current.currentIndex
+        : current.currentIndex + 1;
+      if (nextIndex < queue.length) {
         return {
           ...current,
-          currentIndex: current.currentIndex + 1,
+          queue,
+          manualQueueKeys,
+          currentIndex: nextIndex,
           positionSeconds: 0,
+          // The removal can leave the same array position pointing at a new
+          // track, so force a reload to be safe.
+          playbackRequestId: isManualCurrent
+            ? current.playbackRequestId + 1
+            : current.playbackRequestId,
         };
       }
-      if (current.isRepeatEnabled) {
-        return {
-          ...current,
-          currentIndex: 0,
-          positionSeconds: 0,
-          playbackRequestId: current.playbackRequestId + 1,
-        };
-      }
-      if (reason === "manual") {
-        return current;
-      }
-      return { ...current, isPlaying: false, positionSeconds: current.durationSeconds };
+      // The queue always loops: finishing the last track wraps back to the first.
+      return {
+        ...current,
+        queue,
+        manualQueueKeys,
+        currentIndex: 0,
+        positionSeconds: 0,
+        playbackRequestId: current.playbackRequestId + 1,
+      };
     });
   }
 
@@ -1786,6 +2175,20 @@ function App() {
     }
     selectedIdRef.current = id;
     setSelectedId(id);
+  }
+
+  function openPlayerFromMiniPlayer() {
+    // Arm the momentum guard before switching pages so the trailing wheel
+    // events from the opening swipe cannot scroll the freshly mounted player.
+    isPlayerOpenMomentumBlockedRef.current = true;
+    if (playerOpenMomentumIdleTimerRef.current !== null) {
+      window.clearTimeout(playerOpenMomentumIdleTimerRef.current);
+    }
+    playerOpenMomentumIdleTimerRef.current = window.setTimeout(() => {
+      isPlayerOpenMomentumBlockedRef.current = false;
+      playerOpenMomentumIdleTimerRef.current = null;
+    }, playerReturnMomentumIdleMs);
+    selectDestination("player");
   }
 
   function selectHomeDestination(id: DestinationId) {
@@ -1866,11 +2269,12 @@ function App() {
                 : current.durationSeconds,
             }));
           }}
-          onEnded={() => advanceQueue("ended")}
+          onEnded={() => advanceQueue()}
           onPlay={() => setPlayer((current) => ({ ...current, isPlaying: true }))}
           onPause={() => setPlayer((current) => ({ ...current, isPlaying: false }))}
         />
         <section
+          ref={shellPageRef}
           className={`shell-page ${showMiniPlayer ? "has-mini-player" : ""}`}
           aria-label={selected.label}
         >
@@ -1976,7 +2380,7 @@ function App() {
             <MiniPlayer
               player={player}
               actions={playerActions}
-              onOpenPlayer={() => selectDestination("player")}
+              onOpenPlayer={openPlayerFromMiniPlayer}
             />
           ) : null}
         </section>
@@ -2068,6 +2472,9 @@ function PageForDestination({
           activeDownloadTrackIds={activeDownloadTrackIds}
           downloadActions={downloadActions}
           likedActions={likedActions}
+          playlists={playlists}
+          playlistTracksById={playlistTracksById}
+          playlistActions={playlistActions}
           serverConnectionVersion={serverConnectionVersion}
         />
       );
@@ -3347,15 +3754,6 @@ function PlaybackControls({
     <div className="playback-controls">
       <button
         type="button"
-        className={player.isRepeatEnabled ? "is-active" : ""}
-        aria-label={player.isRepeatEnabled ? "Turn repeat off" : "Repeat queue"}
-        title={player.isRepeatEnabled ? "Turn repeat off" : "Repeat queue"}
-        onClick={actions.toggleRepeat}
-      >
-        <Repeat size={22} />
-      </button>
-      <button
-        type="button"
         className={player.isShuffleEnabled ? "is-active" : ""}
         disabled={player.queue.length < 2}
         aria-label={player.isShuffleEnabled ? "Turn shuffle off" : "Shuffle upcoming queue"}
@@ -3409,11 +3807,7 @@ function QueueList({
   actions: PlayerActions;
   downloads: DownloadedTrack[];
 }) {
-  const indexes = visibleQueueIndexes(
-    player.currentIndex,
-    player.queue.length,
-    player.isRepeatEnabled,
-  );
+  const indexes = visibleQueueIndexes(player.currentIndex, player.queue.length);
   const localTrackIds = new Set(
     downloads
       .filter((download) => download.state === "complete")
@@ -3461,20 +3855,25 @@ function QueueList({
   );
 }
 
-function visibleQueueIndexes(currentIndex: number, queueLength: number, shouldWrap: boolean) {
+function visibleQueueIndexes(currentIndex: number, queueLength: number) {
   if (queueLength <= 0) {
     return [];
   }
 
-  const visibleCount = shouldWrap ? 10 : Math.min(10, queueLength - currentIndex);
+  // The queue always loops, so the visible window always wraps around.
+  const visibleCount = Math.min(10, queueLength);
   return Array.from({ length: visibleCount }, (_, offset) =>
-    shouldWrap ? (currentIndex + offset) % queueLength : currentIndex + offset,
+    (currentIndex + offset) % queueLength,
   );
 }
 
 function queueTrackKey(track: TrackModel) {
   return track.queueKey ?? track.id;
 }
+
+// Gives every manually queued entry a unique queue key so the same song can
+// be queued multiple times without colliding.
+let queueInsertCounter = 0;
 
 function sourceMapForTracks(
   tracks: TrackModel[],
@@ -3751,6 +4150,9 @@ function LikedPage({
   activeDownloadTrackIds,
   downloadActions,
   likedActions,
+  playlists,
+  playlistTracksById,
+  playlistActions,
   serverConnectionVersion,
 }: {
   likedTracks: LikedTrack[];
@@ -3760,9 +4162,13 @@ function LikedPage({
   activeDownloadTrackIds: Set<string>;
   downloadActions: DownloadActions;
   likedActions: LikedActions;
+  playlists: PlaylistModel[];
+  playlistTracksById: Record<string, PlaylistTrack[]>;
+  playlistActions: PlaylistActions;
   serverConnectionVersion: number;
 }) {
   const [isOffline, setIsOffline] = useState(false);
+  const [playlistAddTrack, setPlaylistAddTrack] = useState<TrackModel | null>(null);
   const [hasCheckedConnection, setHasCheckedConnection] = useState(false);
   const [isReordering, setIsReordering] = useState(false);
   const [selectedReorderIndex, setSelectedReorderIndex] = useState<number | null>(null);
@@ -4027,10 +4433,6 @@ function LikedPage({
                 <Shuffle size={18} />
                 Shuffle
               </button>
-              <button type="button" onClick={actions.toggleRepeat}>
-                <Repeat size={18} />
-                {player.isRepeatEnabled ? "Repeat on" : "Repeat"}
-              </button>
               <button type="button" disabled={likedTracks.length < 2} onClick={startReorder}>
                 <ListMusic size={18} />
                 Reorder
@@ -4050,7 +4452,53 @@ function LikedPage({
         items={circularItems}
         onActiveIndexChange={setCircularActiveIndex}
         onPlayIndex={playLikedFrom}
+        onQueueIndex={(index) => {
+          const track = tracks[index];
+          if (track) {
+            actions.queueTrackNext(track);
+          }
+        }}
+        onToggleLiked={(index) => {
+          const track = tracks[index];
+          if (track) {
+            likedActions.toggleLiked(track);
+          }
+        }}
+        onAddToPlaylist={(index) => {
+          const track = tracks[index];
+          if (track) {
+            setPlaylistAddTrack(track);
+          }
+        }}
       />
+      {playlistAddTrack ? (
+        <div
+          className="playlist-dialog-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) {
+              setPlaylistAddTrack(null);
+            }
+          }}
+        >
+          <section
+            className="playlist-dialog playlist-add-dialog"
+            aria-modal="true"
+            role="dialog"
+            aria-label={`Add ${playlistAddTrack.title} to playlists`}
+          >
+            <h2>{playlistAddTrack.title}</h2>
+            <PlaylistAddMenu
+              track={playlistAddTrack}
+              playlists={playlists}
+              tracksByPlaylistId={playlistTracksById}
+              playlistActions={playlistActions}
+              defaultOpen
+              onClosed={() => setPlaylistAddTrack(null)}
+            />
+          </section>
+        </div>
+      ) : null}
       <div className="track-list liked-list deferred-circular-control">
         {visibleLikedTracks.map((liked, index) => {
           const download = downloadsByTrackId.get(liked.trackId) ?? null;
@@ -4196,6 +4644,15 @@ const circularScrollerMaxWheelStep = 0.72;
 const circularScrollerDragThreshold = 5;
 const circularScrollerClickTransitionMs = 430;
 const circularScrollerPlaybackTransitionMs = 420;
+const circularScrollerTabSwipeThresholdPx = 56;
+const circularScrollerDoubleTapMs = 280;
+const circularScrollerQueuedFlashMs = 900;
+
+const primaryTabSwipeEventName = "nekofm:primary-tab-swipe";
+
+type PrimaryTabSwipeDetail = {
+  direction: 1 | -1;
+};
 
 function circularScrollerPosition(slot: number) {
   if (slot <= -1) {
@@ -4253,14 +4710,30 @@ function CircularLikedScroller({
   items,
   onActiveIndexChange,
   onPlayIndex,
+  onQueueIndex,
+  onToggleLiked,
+  onAddToPlaylist,
 }: {
   activeIndex: number;
   items: CircularLikedItem[];
   onActiveIndexChange: (index: number) => void;
   onPlayIndex: (index: number) => void;
+  onQueueIndex: (index: number) => void;
+  onToggleLiked: (index: number) => void;
+  onAddToPlaylist: (index: number) => void;
 }) {
   const [wheelPosition, setWheelPosition] = useState(activeIndex);
   const [isInteracting, setIsInteracting] = useState(false);
+  const [flippedItemIndex, setFlippedItemIndex] = useState<number | null>(null);
+  const [queuedFlashItemIndex, setQueuedFlashItemIndex] = useState<number | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const pendingTapRef = useRef<{
+    itemIndex: number;
+    playIndex: number;
+    slot: number;
+    timer: number;
+  } | null>(null);
+  const queuedFlashTimerRef = useRef<number | null>(null);
   const wheelPositionRef = useRef(activeIndex);
   const dragRef = useRef<{
     clickTarget: {
@@ -4268,10 +4741,12 @@ function CircularLikedScroller({
       playIndex: number;
       slot: number;
     } | null;
+    axis: "none" | "vertical" | "horizontal";
     hasPointerCapture: boolean;
     pointerId: number;
     sideFactor: number;
     startPosition: number;
+    startX: number;
     startY: number;
     totalMovement: number;
   } | null>(null);
@@ -4351,6 +4826,54 @@ function CircularLikedScroller({
       if (playbackAnimationFrameRef.current !== null) {
         window.cancelAnimationFrame(playbackAnimationFrameRef.current);
       }
+      if (pendingTapRef.current !== null) {
+        window.clearTimeout(pendingTapRef.current.timer);
+      }
+      if (queuedFlashTimerRef.current !== null) {
+        window.clearTimeout(queuedFlashTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    // Songs can be removed (e.g. unliked from the flip card), which shifts
+    // item indexes, so any open flip is closed when the list changes.
+    setFlippedItemIndex(null);
+  }, [items.length]);
+
+  useEffect(() => {
+    // macOS trackpads report a hard "force press" through WebKit-specific
+    // events; treat it exactly like a middle-click on the card.
+    const rootNode = rootRef.current;
+    if (!rootNode) {
+      return;
+    }
+    const handleForcePress = (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof Element)) {
+        return;
+      }
+      const card = target.closest<HTMLElement>(".liked-circular-card");
+      if (!card || target.closest(".liked-circular-card-back")) {
+        return;
+      }
+      const itemIndex = Number(card.dataset.itemIndex);
+      if (Number.isFinite(itemIndex)) {
+        event.preventDefault();
+        // The force press rides on top of a normal click gesture; cancel that
+        // click so releasing the press does not also play the song.
+        dragRef.current = null;
+        suppressClickRef.current = true;
+        if (pendingTapRef.current !== null) {
+          window.clearTimeout(pendingTapRef.current.timer);
+          pendingTapRef.current = null;
+        }
+        setFlippedItemIndex(itemIndex);
+      }
+    };
+    rootNode.addEventListener("webkitmouseforcedown", handleForcePress);
+    return () => {
+      rootNode.removeEventListener("webkitmouseforcedown", handleForcePress);
     };
   }, []);
 
@@ -4411,6 +4934,9 @@ function CircularLikedScroller({
   }
 
   function handleWheel(event: ReactWheelEvent<HTMLDivElement>) {
+    if (flippedItemIndex !== null) {
+      setFlippedItemIndex(null);
+    }
     if (items.length < 2) {
       return;
     }
@@ -4438,8 +4964,73 @@ function CircularLikedScroller({
     scheduleSnap(next);
   }
 
+  function handleCardTap(tap: { itemIndex: number; playIndex: number; slot: number }) {
+    const pending = pendingTapRef.current;
+    if (pending !== null) {
+      window.clearTimeout(pending.timer);
+      pendingTapRef.current = null;
+      if (pending.itemIndex === tap.itemIndex) {
+        // Double tap: add the song to the queue as the next "play next" entry.
+        if (!items[tap.itemIndex]?.isUnavailableOffline) {
+          flashQueued(tap.itemIndex);
+          onQueueIndex(tap.playIndex);
+        }
+        return;
+      }
+    }
+    const timer = window.setTimeout(() => {
+      pendingTapRef.current = null;
+      if (tap.itemIndex === nearestIndex) {
+        onPlayIndex(tap.playIndex);
+      } else {
+        moveToAndPlay(tap.itemIndex, tap.playIndex, tap.slot);
+      }
+    }, circularScrollerDoubleTapMs);
+    pendingTapRef.current = { ...tap, timer };
+  }
+
+  function flashQueued(itemIndex: number) {
+    if (queuedFlashTimerRef.current !== null) {
+      window.clearTimeout(queuedFlashTimerRef.current);
+    }
+    setQueuedFlashItemIndex(itemIndex);
+    queuedFlashTimerRef.current = window.setTimeout(() => {
+      setQueuedFlashItemIndex(null);
+      queuedFlashTimerRef.current = null;
+    }, circularScrollerQueuedFlashMs);
+  }
+
   function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
-    if (items.length < 2 || event.button !== 0) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (event.button === 1) {
+      // Middle-click (or force press) flips the pressed card to its actions.
+      event.preventDefault();
+      const card = target?.closest<HTMLElement>(".liked-circular-card");
+      const itemIndex = Number(card?.dataset.itemIndex);
+      if (card && Number.isFinite(itemIndex)) {
+        // Cancel any in-flight tap so the flip never doubles as a play.
+        dragRef.current = null;
+        suppressClickRef.current = true;
+        if (pendingTapRef.current !== null) {
+          window.clearTimeout(pendingTapRef.current.timer);
+          pendingTapRef.current = null;
+        }
+        setFlippedItemIndex(itemIndex);
+      }
+      return;
+    }
+    if (event.button !== 0) {
+      return;
+    }
+    if (flippedItemIndex !== null) {
+      // Flip-card action buttons keep working; any other tap flips back.
+      if (target?.closest(".liked-circular-card-back")) {
+        return;
+      }
+      setFlippedItemIndex(null);
+      return;
+    }
+    if (items.length === 0) {
       return;
     }
     cancelPlaybackAnimation();
@@ -4464,10 +5055,12 @@ function CircularLikedScroller({
         Number.isFinite(itemIndex) && Number.isFinite(playIndex) && Number.isFinite(slot)
           ? { itemIndex, playIndex, slot }
           : null,
+      axis: "none",
       hasPointerCapture: false,
       pointerId: event.pointerId,
       sideFactor: sideFactorFor(event.clientX, event.currentTarget),
       startPosition: wheelPositionRef.current,
+      startX: event.clientX,
       startY: event.clientY,
       totalMovement: 0,
     };
@@ -4479,17 +5072,31 @@ function CircularLikedScroller({
     if (!drag || drag.pointerId !== event.pointerId) {
       return;
     }
-    const movement = event.clientY - drag.startY;
-    drag.totalMovement = Math.abs(movement);
-    suppressClickRef.current =
-      drag.totalMovement >= circularScrollerDragThreshold;
+    const horizontalMovement = event.clientX - drag.startX;
+    const verticalMovement = event.clientY - drag.startY;
+    drag.totalMovement = Math.max(
+      Math.abs(horizontalMovement),
+      Math.abs(verticalMovement),
+    );
+    if (drag.axis === "none" && drag.totalMovement >= circularScrollerDragThreshold) {
+      // Lock the gesture to one axis: vertical rotates the circle,
+      // horizontal swipes between the primary tabs.
+      drag.axis =
+        Math.abs(horizontalMovement) > Math.abs(verticalMovement)
+          ? "horizontal"
+          : "vertical";
+    }
+    suppressClickRef.current = drag.axis !== "none";
     if (suppressClickRef.current && !drag.hasPointerCapture) {
       event.currentTarget.setPointerCapture(event.pointerId);
       drag.hasPointerCapture = true;
     }
+    if (drag.axis !== "vertical" || items.length < 2) {
+      return;
+    }
     const next =
       drag.startPosition +
-      (movement * drag.sideFactor) / circularScrollerDragPixelsPerSlot;
+      (verticalMovement * drag.sideFactor) / circularScrollerDragPixelsPerSlot;
     wheelPositionRef.current = next;
     setWheelPosition(next);
   }
@@ -4503,17 +5110,22 @@ function CircularLikedScroller({
     if (drag.hasPointerCapture) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
-    if (!suppressClickRef.current && drag.clickTarget) {
-      suppressClickRef.current = true;
-      if (drag.clickTarget.itemIndex === nearestIndex) {
-        onPlayIndex(drag.clickTarget.playIndex);
-      } else {
-        moveToAndPlay(
-          drag.clickTarget.itemIndex,
-          drag.clickTarget.playIndex,
-          drag.clickTarget.slot,
+    if (drag.axis === "horizontal") {
+      const horizontalMovement = event.clientX - drag.startX;
+      if (Math.abs(horizontalMovement) >= circularScrollerTabSwipeThresholdPx) {
+        // Dragging content to the left reveals the tab on the right.
+        window.dispatchEvent(
+          new CustomEvent<PrimaryTabSwipeDetail>(primaryTabSwipeEventName, {
+            detail: { direction: horizontalMovement < 0 ? 1 : -1 },
+          }),
         );
       }
+      setIsInteracting(false);
+      return;
+    }
+    if (!suppressClickRef.current && drag.clickTarget) {
+      suppressClickRef.current = true;
+      handleCardTap(drag.clickTarget);
       return;
     }
     snapToNearest(wheelPositionRef.current);
@@ -4525,6 +5137,7 @@ function CircularLikedScroller({
 
   return (
     <div
+      ref={rootRef}
       className={`liked-circular-scroller ${isInteracting ? "is-interacting" : ""}`}
       aria-label="Liked songs circular scroller"
       onWheel={handleWheel}
@@ -4532,6 +5145,7 @@ function CircularLikedScroller({
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
+      onAuxClick={(event) => event.preventDefault()}
       data-no-page-drag
     >
       <div className="liked-circular-center" aria-live="polite">
@@ -4559,48 +5173,94 @@ function CircularLikedScroller({
       </div>
 
       {wheelItems.map(({ item, itemIndex, slot }) => {
-        const { opacity, scale } = circularScrollerPosition(slot);
+        // With fewer songs than slots, stretch the spacing so the cards sit
+        // symmetrically around the whole circle.
+        const slotScale =
+          circularScrollerSlotCount /
+          Math.min(Math.max(items.length, 1), circularScrollerSlotCount);
+        const effectiveSlot = slot * slotScale;
+        const { opacity, scale } = circularScrollerPosition(effectiveSlot);
         const isActive = itemIndex === nearestIndex;
+        const isFlipped = flippedItemIndex === itemIndex;
         const orbitTitleOpacity = slot < 0 ? 0 : Math.min(1, slot);
         const style = {
-          "--circle-distance": `${circularScrollerDistance(slot)}%`,
+          "--circle-distance": `${circularScrollerDistance(effectiveSlot)}%`,
           "--circle-opacity": opacity,
           "--circle-scale": scale,
           "--orbit-title-opacity": orbitTitleOpacity,
         } as CSSProperties;
 
         return (
-          <button
+          <div
             key={item.liked.trackId}
-            className={`liked-circular-card ${isActive ? "is-active" : ""} ${slot <= -1 ? "is-exiting" : ""} ${slot >= circularScrollerSlotCount ? "is-entering" : ""} ${item.isPlaying ? "is-playing" : ""} ${item.isUnavailableOffline ? "is-unavailable" : ""}`}
+            className={`liked-circular-card ${isActive ? "is-active" : ""} ${slot <= -1 ? "is-exiting" : ""} ${slot >= circularScrollerSlotCount ? "is-entering" : ""} ${item.isPlaying ? "is-playing" : ""} ${item.isUnavailableOffline ? "is-unavailable" : ""} ${isFlipped ? "is-flipped" : ""}`}
             style={style}
-            type="button"
+            role="button"
+            tabIndex={0}
             aria-label={`${item.track.title} by ${item.track.artist}`}
             data-item-index={itemIndex}
             data-play-index={item.index}
             data-slot={slot}
             title={item.isUnavailableOffline ? "Not downloaded and unavailable offline" : undefined}
-            onClick={() => {
-              if (suppressClickRef.current) {
-                suppressClickRef.current = false;
-                return;
-              }
-              if (isActive) {
-                onPlayIndex(item.index);
-              } else {
-                moveToAndPlay(itemIndex, item.index, slot);
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                handleCardTap({ itemIndex, playIndex: item.index, slot });
               }
             }}
           >
-            <AlbumArt imageUri={item.coverUri} label={`${item.track.title} cover art`} />
-            {item.isUnavailableOffline ? (
-              <span className="liked-circular-unavailable" aria-hidden="true">
-                <ShieldAlert size={24} />
+            <span className="liked-circular-card-flip">
+              <span className="liked-circular-card-front">
+                <AlbumArt imageUri={item.coverUri} label={`${item.track.title} cover art`} />
+                {item.isUnavailableOffline ? (
+                  <span className="liked-circular-unavailable" aria-hidden="true">
+                    <ShieldAlert size={24} />
+                  </span>
+                ) : null}
+                <span className="liked-circular-number">{item.index + 1}</span>
+              </span>
+              <span className="liked-circular-card-back" aria-hidden={!isFlipped}>
+                <button
+                  type="button"
+                  tabIndex={isFlipped ? 0 : -1}
+                  aria-label="Remove from Liked"
+                  title="Remove from Liked"
+                  onClick={() => {
+                    setFlippedItemIndex(null);
+                    onToggleLiked(item.index);
+                  }}
+                >
+                  <HeartOff size={15} />
+                </button>
+                <button
+                  type="button"
+                  tabIndex={isFlipped ? 0 : -1}
+                  aria-label="Add to playlist"
+                  title="Add to playlist"
+                  onClick={() => {
+                    setFlippedItemIndex(null);
+                    onAddToPlaylist(item.index);
+                  }}
+                >
+                  <ListPlus size={15} />
+                </button>
+                <button
+                  type="button"
+                  tabIndex={isFlipped ? 0 : -1}
+                  aria-label="Work in progress"
+                  title="Work in progress"
+                >
+                  <Wrench size={15} />
+                </button>
+              </span>
+            </span>
+            {queuedFlashItemIndex === itemIndex ? (
+              <span className="liked-circular-queued-flash" role="status">
+                Queued
               </span>
             ) : null}
-            <span className="liked-circular-number">{item.index + 1}</span>
             <span className="liked-circular-song-name">{item.track.title}</span>
-          </button>
+          </div>
         );
       })}
     </div>
@@ -4649,13 +5309,41 @@ function PlaylistAddMenu({
   playlists,
   tracksByPlaylistId,
   playlistActions,
+  defaultOpen = false,
+  onClosed,
 }: {
   track: TrackModel;
   playlists: PlaylistModel[];
   tracksByPlaylistId: Record<string, PlaylistTrack[]>;
   playlistActions: PlaylistActions;
+  defaultOpen?: boolean;
+  onClosed?: () => void;
 }) {
-  const [isOpen, setIsOpen] = useState(false);
+  const [isOpen, setIsOpen] = useState(defaultOpen);
+  const hasOpenedRef = useRef(false);
+
+  useEffect(() => {
+    if (isOpen) {
+      hasOpenedRef.current = true;
+      return;
+    }
+    if (hasOpenedRef.current) {
+      onClosed?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!defaultOpen) {
+      return;
+    }
+    Promise.all(
+      playlists.map((playlist) => playlistActions.loadPlaylistTracks(playlist.id)),
+    ).catch(() => {
+      // Membership hints are best-effort; adding still works without them.
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [newPlaylistName, setNewPlaylistName] = useState("");
   const [isWorking, setIsWorking] = useState(false);
@@ -4762,15 +5450,17 @@ function PlaylistAddMenu({
     .join(", ");
 
   return (
-    <span className="playlist-add-menu">
-      <button
-        type="button"
-        aria-label="Add to playlist"
-        title="Add to playlist"
-        onClick={openMenu}
-      >
-        <ListPlus size={20} />
-      </button>
+    <span className={`playlist-add-menu ${defaultOpen ? "is-dialog" : ""}`}>
+      {defaultOpen ? null : (
+        <button
+          type="button"
+          aria-label="Add to playlist"
+          title="Add to playlist"
+          onClick={openMenu}
+        >
+          <ListPlus size={20} />
+        </button>
+      )}
       {isOpen ? (
         <span className="playlist-add-popover">
           <strong>Add to playlists</strong>
@@ -5190,10 +5880,6 @@ function PlaylistsPage({
               <button type="button" disabled={visiblePlayableTracks.length < 2} onClick={shufflePlaylist}>
                 <Shuffle size={18} />
                 Shuffle
-              </button>
-              <button type="button" onClick={playerActions.toggleRepeat}>
-                <Repeat size={18} />
-                {player.isRepeatEnabled ? "Repeat on" : "Repeat"}
               </button>
               <button type="button" disabled={tracks.length < 2} onClick={startReorder}>
                 <ListMusic size={18} />
@@ -6971,6 +7657,10 @@ function sameDownloadPath(left: string, right: string) {
   return normalize(left) === normalize(right);
 }
 
+const miniPlayerSwipeThresholdPx = 48;
+const miniPlayerTapMovementPx = 10;
+const miniPlayerLongPressMs = 480;
+
 function MiniPlayer({
   player,
   actions,
@@ -6980,16 +7670,99 @@ function MiniPlayer({
   actions: PlayerActions;
   onOpenPlayer: () => void;
 }) {
-  const singleTapTimerRef = useRef<number | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const gestureRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    longPressFired: boolean;
+  } | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const wheelStreamActiveRef = useRef(false);
+  const wheelStreamIdleTimerRef = useRef<number | null>(null);
+  const actionsRef = useRef(actions);
+  const onOpenPlayerRef = useRef(onOpenPlayer);
   const currentTrack = player.queue[player.currentIndex] ?? null;
+  const hasTrack = Boolean(currentTrack && player.album);
+
+  useEffect(() => {
+    actionsRef.current = actions;
+    onOpenPlayerRef.current = onOpenPlayer;
+  });
 
   useEffect(() => {
     return () => {
-      if (singleTapTimerRef.current !== null) {
-        window.clearTimeout(singleTapTimerRef.current);
+      if (longPressTimerRef.current !== null) {
+        window.clearTimeout(longPressTimerRef.current);
+      }
+      if (wheelStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(wheelStreamIdleTimerRef.current);
       }
     };
   }, []);
+
+  useEffect(() => {
+    const rootNode = rootRef.current;
+    if (!rootNode || !hasTrack) {
+      return;
+    }
+
+    // Trackpad swipes arrive as wheel streams with momentum. Only the first
+    // event of a stream triggers an action so one swipe never skips twice.
+    const markWheelStreamActive = () => {
+      if (wheelStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(wheelStreamIdleTimerRef.current);
+      }
+      wheelStreamActiveRef.current = true;
+      wheelStreamIdleTimerRef.current = window.setTimeout(() => {
+        wheelStreamActiveRef.current = false;
+        wheelStreamIdleTimerRef.current = null;
+      }, wheelNavigationStreamIdleMs);
+    };
+
+    const handleWheel = (event: WheelEvent) => {
+      const horizontalDelta = event.deltaX;
+      const verticalDelta = event.deltaY;
+      const isHorizontal =
+        Math.abs(horizontalDelta) >= wheelNavigationThresholdPx &&
+        Math.abs(horizontalDelta) > Math.abs(verticalDelta) * 1.15;
+      const isVertical =
+        Math.abs(verticalDelta) >= wheelNavigationThresholdPx &&
+        Math.abs(verticalDelta) > Math.abs(horizontalDelta) * 1.15;
+      if (!isHorizontal && !isVertical) {
+        return;
+      }
+      event.preventDefault();
+      const wasStreamActive = wheelStreamActiveRef.current;
+      markWheelStreamActive();
+      if (wasStreamActive) {
+        return;
+      }
+      if (isHorizontal) {
+        // Natural scrolling: fingers swiping left report a positive deltaX.
+        if (horizontalDelta > 0) {
+          actionsRef.current.seekNext();
+        } else {
+          actionsRef.current.seekBack();
+        }
+        return;
+      }
+      // Natural scrolling: fingers swiping up report a positive deltaY.
+      if (verticalDelta > 0) {
+        onOpenPlayerRef.current();
+      }
+    };
+
+    rootNode.addEventListener("wheel", handleWheel, { passive: false });
+    return () => {
+      rootNode.removeEventListener("wheel", handleWheel);
+      if (wheelStreamIdleTimerRef.current !== null) {
+        window.clearTimeout(wheelStreamIdleTimerRef.current);
+        wheelStreamIdleTimerRef.current = null;
+      }
+      wheelStreamActiveRef.current = false;
+    };
+  }, [hasTrack]);
 
   if (!currentTrack || !player.album) {
     return null;
@@ -7000,90 +7773,157 @@ function MiniPlayer({
       ? 0
       : Math.min(1, Math.max(0, player.positionSeconds / player.durationSeconds));
 
-  function handleMiniPlayerTap() {
-    if (singleTapTimerRef.current !== null) {
-      window.clearTimeout(singleTapTimerRef.current);
-      singleTapTimerRef.current = null;
-      actions.toggleShuffle();
+  function clearLongPressTimer() {
+    if (longPressTimerRef.current !== null) {
+      window.clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) {
       return;
     }
-    singleTapTimerRef.current = window.setTimeout(() => {
-      singleTapTimerRef.current = null;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    gestureRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      longPressFired: false,
+    };
+    clearLongPressTimer();
+    longPressTimerRef.current = window.setTimeout(() => {
+      longPressTimerRef.current = null;
+      const gesture = gestureRef.current;
+      if (!gesture) {
+        return;
+      }
+      gesture.longPressFired = true;
+      actionsRef.current.toggleShuffle();
+    }, miniPlayerLongPressMs);
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) {
+      return;
+    }
+    const movement = Math.max(
+      Math.abs(event.clientX - gesture.startX),
+      Math.abs(event.clientY - gesture.startY),
+    );
+    if (movement > miniPlayerTapMovementPx) {
+      // The pointer is swiping, so this can no longer become a long press.
+      clearLongPressTimer();
+    }
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) {
+      return;
+    }
+    gestureRef.current = null;
+    clearLongPressTimer();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (gesture.longPressFired) {
+      return;
+    }
+    const horizontalMovement = event.clientX - gesture.startX;
+    const verticalMovement = event.clientY - gesture.startY;
+    const absHorizontal = Math.abs(horizontalMovement);
+    const absVertical = Math.abs(verticalMovement);
+    if (absHorizontal >= miniPlayerSwipeThresholdPx && absHorizontal > absVertical) {
+      // One discrete track change per swipe gesture — no overshoot.
+      if (horizontalMovement < 0) {
+        actions.seekNext();
+      } else {
+        actions.seekBack();
+      }
+      return;
+    }
+    if (verticalMovement <= -miniPlayerSwipeThresholdPx && absVertical > absHorizontal) {
       onOpenPlayer();
-    }, 240);
+      return;
+    }
+    if (absHorizontal <= miniPlayerTapMovementPx && absVertical <= miniPlayerTapMovementPx) {
+      actions.togglePlayPause();
+    }
+  }
+
+  function handlePointerCancel(event: ReactPointerEvent<HTMLDivElement>) {
+    const gesture = gestureRef.current;
+    if (!gesture || gesture.pointerId !== event.pointerId) {
+      return;
+    }
+    gestureRef.current = null;
+    clearLongPressTimer();
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      actions.togglePlayPause();
+    }
   }
 
   return (
-    <div className={`mini-player ${player.isShuffleEnabled ? "is-shuffling" : ""}`}>
+    <div
+      ref={rootRef}
+      className={`mini-player ${player.isShuffleEnabled ? "is-shuffling" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-label={
+        player.isShuffleEnabled
+          ? "Mini player. Shuffle is on. Tap to play or pause, swipe left for next, swipe right for previous, swipe up to open the player, hold to turn shuffle off"
+          : "Mini player. Tap to play or pause, swipe left for next, swipe right for previous, swipe up to open the player, hold to turn shuffle on"
+      }
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onKeyDown={handleKeyDown}
+      onContextMenu={(event) => event.preventDefault()}
+    >
       <div className="mini-progress" style={{ transform: `scaleX(${progress})` }} />
       <div className="mini-body">
-        <button
-          className="mini-open"
-          type="button"
-          aria-label={player.isShuffleEnabled ? "Open player. Shuffle is on" : "Open player"}
-          onClick={handleMiniPlayerTap}
-        >
-          <AlbumArt
-            imageUri={currentTrack.coverArtUri ?? player.album.coverArtUri}
-            label={`${player.album.name} cover art`}
-          />
-          <span className="mini-copy">
-            <strong>{currentTrack.title}</strong>
-            <span>
-              {currentTrack.artist}
-              {player.source ? (
-                <span
-                  className="mini-source"
-                  title={player.source === "local" ? "Playing from local download" : "Streaming from server"}
-                  aria-label={player.source === "local" ? "Playing from local download" : "Streaming from server"}
-                >
-                  {player.source === "local" ? <CircleCheck size={14} /> : <Network size={14} />}
-                  {player.source === "local" ? "Local" : "Streaming"}
-                </span>
-              ) : null}
-            </span>
+        <AlbumArt
+          imageUri={currentTrack.coverArtUri ?? player.album.coverArtUri}
+          label={`${player.album.name} cover art`}
+        />
+        <span className="mini-copy">
+          <strong>{currentTrack.title}</strong>
+          <span>
+            {currentTrack.artist}
+            {player.source ? (
+              <span
+                className="mini-source"
+                title={player.source === "local" ? "Playing from local download" : "Streaming from server"}
+                aria-label={player.source === "local" ? "Playing from local download" : "Streaming from server"}
+              >
+                {player.source === "local" ? <CircleCheck size={14} /> : <Network size={14} />}
+                {player.source === "local" ? "Local" : "Streaming"}
+              </span>
+            ) : null}
           </span>
-          {player.isShuffleEnabled ? (
-            <span className="mini-shuffle-state" aria-label="Shuffle on">
-              <Shuffle size={16} />
-              Shuffle
-            </span>
-          ) : null}
-        </button>
-        <div className="mini-controls">
-          <button
-            type="button"
-            aria-label="Restart or previous track"
-            title="Restart or previous track"
-            onClick={actions.seekBack}
-          >
-            <SkipBack size={22} />
-          </button>
-          <button
-            type="button"
-            className="mini-play"
-            disabled={player.isLoading}
-            aria-label={player.isPlaying ? "Pause" : "Play"}
-            title={player.isPlaying ? "Pause" : "Play"}
-            onClick={actions.togglePlayPause}
-          >
-            {player.isLoading ? (
-              <LoaderCircle className="spin-icon" size={20} />
-            ) : player.isPlaying ? (
-              <Pause size={24} />
-            ) : (
-              <Play size={24} />
-            )}
-          </button>
-          <button
-            type="button"
-            aria-label="Next track"
-            title="Next track"
-            onClick={actions.seekNext}
-          >
-            <SkipForward size={22} />
-          </button>
-        </div>
+        </span>
+        {player.isShuffleEnabled ? (
+          <span className="mini-shuffle-state" aria-label="Shuffle on">
+            <Shuffle size={16} />
+            Shuffle
+          </span>
+        ) : null}
+        <span className="mini-state" aria-hidden="true">
+          {player.isLoading ? (
+            <LoaderCircle className="spin-icon" size={20} />
+          ) : player.isPlaying ? (
+            <Pause size={20} />
+          ) : (
+            <Play size={20} />
+          )}
+        </span>
       </div>
     </div>
   );

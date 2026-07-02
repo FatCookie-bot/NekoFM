@@ -10,7 +10,9 @@ services:
       ND_SCANNER_SCHEDULE: "@every 1h"
       ND_SCANNER_WATCHERWAIT: 1m
       ND_SCANNER_SCANONSTARTUP: "true"
-      ND_SCANNER_PURGEMISSING: full
+      # "always" purges deleted files from the index on every scan (quick scans
+      # included), so the app's launch-time library check sees deletions.
+      ND_SCANNER_PURGEMISSING: always
       ND_LOGLEVEL: info
       ND_SESSIONTIMEOUT: 24h
     volumes:

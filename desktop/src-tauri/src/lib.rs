@@ -291,6 +291,7 @@ struct SubsonicResponse {
 
 #[derive(Debug, Deserialize)]
 struct SubsonicError {
+    code: Option<i64>,
     message: Option<String>,
 }
 
@@ -456,17 +457,108 @@ async fn start_server_scan_with_profile(
 
 async fn start_scan_for_profile(profile: &SavedServerProfile) -> Result<ServerScanResult, String> {
     let response = get_subsonic(&profile, "startScan.view", &[("fullScan", "false")]).await?;
-    let scan_status = response.data.get("scanStatus");
+    Ok(scan_result_from_status(response.data.get("scanStatus")))
+}
+
+#[tauri::command]
+async fn get_server_scan_status(app: tauri::AppHandle) -> Result<ServerScanResult, String> {
+    let profile = require_saved_profile(&app)?;
+    let response = get_subsonic(&profile, "getScanStatus.view", &[]).await?;
+    Ok(scan_result_from_status(response.data.get("scanStatus")))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryCleanupResult {
+    checked_count: i64,
+    removed_liked_count: i64,
+    removed_playlist_entry_count: i64,
+}
+
+/// Removes liked songs and playlist entries whose tracks no longer exist on
+/// the server and have no completed local download. Only runs deletions when
+/// the server definitively reports a track as missing, so an offline or
+/// misbehaving server never wipes local library state.
+#[tauri::command]
+async fn cleanup_missing_server_tracks(
+    app: tauri::AppHandle,
+) -> Result<LibraryCleanupResult, String> {
+    let profile = require_saved_profile(&app)?;
+    let liked = load_liked_tracks_from_disk(&app)?;
+    let store = load_playlist_store(&app)?;
+    let downloads = repair_downloads(&app)?;
+    let downloaded_track_ids = downloads
+        .iter()
+        .filter(|download| download.state == "complete")
+        .map(|download| download.track_id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let mut candidate_ids = std::collections::BTreeSet::new();
+    for track in &liked {
+        if !downloaded_track_ids.contains(&track.track_id) {
+            candidate_ids.insert(track.track_id.clone());
+        }
+    }
+    for track in &store.tracks {
+        if !downloaded_track_ids.contains(&track.track_id) {
+            candidate_ids.insert(track.track_id.clone());
+        }
+    }
+
+    let checked_count = candidate_ids.len() as i64;
+    let mut missing_track_ids = std::collections::BTreeSet::new();
+    for track_id in candidate_ids {
+        if !server_track_exists(&profile, &track_id).await? {
+            missing_track_ids.insert(track_id);
+        }
+    }
+
+    if missing_track_ids.is_empty() {
+        return Ok(LibraryCleanupResult {
+            checked_count,
+            removed_liked_count: 0,
+            removed_playlist_entry_count: 0,
+        });
+    }
+
+    let mut liked = liked;
+    let liked_before = liked.len();
+    liked.retain(|track| !missing_track_ids.contains(&track.track_id));
+    let removed_liked_count = (liked_before - liked.len()) as i64;
+    if removed_liked_count > 0 {
+        normalize_liked_positions(&mut liked);
+        save_liked_tracks(&app, &liked)?;
+    }
+
+    let mut store = store;
+    let entries_before = store.tracks.len();
+    store
+        .tracks
+        .retain(|track| !missing_track_ids.contains(&track.track_id));
+    let removed_playlist_entry_count = (entries_before - store.tracks.len()) as i64;
+    if removed_playlist_entry_count > 0 {
+        normalize_all_playlist_positions(&mut store);
+        save_playlist_store(&app, &store)?;
+    }
+
+    Ok(LibraryCleanupResult {
+        checked_count,
+        removed_liked_count,
+        removed_playlist_entry_count,
+    })
+}
+
+fn scan_result_from_status(scan_status: Option<&Value>) -> ServerScanResult {
     let is_scanning = scan_status
         .and_then(|value| value.get("scanning"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let scanned_count = int_value(scan_status.and_then(|value| value.get("count")));
-    Ok(ServerScanResult {
+    ServerScanResult {
         is_scanning,
         scanned_count,
         message: server_scan_message(is_scanning, scanned_count),
-    })
+    }
 }
 
 #[tauri::command]
@@ -1118,6 +1210,32 @@ async fn get_subsonic(
     endpoint: &str,
     parameters: &[(&str, &str)],
 ) -> Result<SubsonicResponse, String> {
+    let subsonic_response = get_subsonic_envelope(profile, endpoint, parameters).await?;
+
+    if subsonic_response.status.as_deref() == Some("ok") {
+        return Ok(subsonic_response);
+    }
+
+    if let Some(message) = subsonic_response
+        .error
+        .as_ref()
+        .and_then(|error| error.message.as_ref())
+        .filter(|message| !message.is_empty())
+    {
+        return Err(message.clone());
+    }
+
+    Err("The server rejected the request.".to_string())
+}
+
+/// Performs the request and returns the raw Subsonic response. `Err` here
+/// always means a transport-level failure; server-side Subsonic errors are
+/// returned inside the response so callers can inspect the error code.
+async fn get_subsonic_envelope(
+    profile: &SavedServerProfile,
+    endpoint: &str,
+    parameters: &[(&str, &str)],
+) -> Result<SubsonicResponse, String> {
     let mut uri = normalize_base_url(&profile.server_url)?;
     let rest_path = join_url_path(uri.path(), &format!("rest/{endpoint}"));
     uri.set_path(&rest_path);
@@ -1153,24 +1271,70 @@ async fn get_subsonic(
         .json::<SubsonicEnvelope>()
         .await
         .map_err(|_| "The server did not return a Subsonic response.".to_string())?;
-    let subsonic_response = body
-        .subsonic_response
-        .ok_or_else(|| "The server did not return a Subsonic response.".to_string())?;
+    body.subsonic_response
+        .ok_or_else(|| "The server did not return a Subsonic response.".to_string())
+}
 
-    if subsonic_response.status.as_deref() == Some("ok") {
-        return Ok(subsonic_response);
+/// Checks whether a track id still exists on the server.
+/// `Ok(false)` is only returned for a definitive "data not found" answer;
+/// transport failures and other server errors are propagated as `Err` so
+/// callers never mistake an unreachable server for deleted tracks.
+async fn server_track_exists(
+    profile: &SavedServerProfile,
+    track_id: &str,
+) -> Result<bool, String> {
+    let response = get_subsonic_envelope(profile, "getSong.view", &[("id", track_id)]).await?;
+    if response.status.as_deref() == Some("ok") {
+        // The index can lag behind the disk (deleted files not yet purged), so
+        // confirm the track is actually streamable instead of trusting getSong.
+        return server_track_is_streamable(profile, track_id).await;
     }
-
-    if let Some(message) = subsonic_response
-        .error
-        .as_ref()
-        .and_then(|error| error.message.as_ref())
-        .filter(|message| !message.is_empty())
-    {
-        return Err(message.clone());
+    if let Some(error) = &response.error {
+        // Subsonic error code 70: the requested data was not found.
+        if error.code == Some(70) {
+            return Ok(false);
+        }
+        if error
+            .message
+            .as_deref()
+            .is_some_and(|message| message.to_lowercase().contains("not found"))
+        {
+            return Ok(false);
+        }
+        if let Some(message) = error.message.as_ref().filter(|message| !message.is_empty()) {
+            return Err(message.clone());
+        }
     }
+    Err("The server rejected the track lookup.".to_string())
+}
 
-    Err("The server rejected the request.".to_string())
+/// Probes the stream endpoint with a tiny ranged request. `Ok(false)` only for
+/// a definitive missing-file answer (404 or a server error); auth and
+/// transport problems are propagated as `Err`.
+async fn server_track_is_streamable(
+    profile: &SavedServerProfile,
+    track_id: &str,
+) -> Result<bool, String> {
+    let uri = stream_uri(profile, track_id)
+        .ok_or_else(|| "Track stream URL could not be created.".to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|error| format!("Server request failed: {error}"))?;
+    let response = client
+        .get(uri)
+        .header(reqwest::header::RANGE, "bytes=0-1")
+        .send()
+        .await
+        .map_err(format_reqwest_error)?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(true);
+    }
+    if status == reqwest::StatusCode::NOT_FOUND || status.is_server_error() {
+        return Ok(false);
+    }
+    Err(format!("Track availability check failed with HTTP {status}."))
 }
 
 fn save_profile_safely(
@@ -4027,6 +4191,8 @@ pub fn run() {
             save_previous_track_threshold,
             search_downloaded_library,
             search_library,
+            cleanup_missing_server_tracks,
+            get_server_scan_status,
             start_server_scan,
             start_server_scan_with_profile,
             test_server_connection,

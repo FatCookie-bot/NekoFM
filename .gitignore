@@ -17,25 +17,15 @@
 music-host/navidrome/data/
 music-host/music/
 
-# Flutter/Dart
-.dart_tool/
-.flutter-plugins
-.flutter-plugins-dependencies
-.pub-cache/
-build/
-coverage/
-
 # React/Tauri
 node_modules/
 dist/
 **/src-tauri/target/
 **/src-tauri/gen/
 
-# Generated platform artifacts and dependency caches
-**/Pods/
-**/.symlinks/
-**/Flutter/ephemeral/
-
 # Logs and local diagnostics
 *.log
 logs/
+
+# Personal Claude Code settings
+.claude/settings.local.json
