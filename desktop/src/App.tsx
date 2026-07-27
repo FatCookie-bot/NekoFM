@@ -84,10 +84,6 @@ type SavedServerProfile = {
   rememberPassword: boolean;
 };
 
-type PlaybackPreferences = {
-  previousTrackThresholdSeconds: number;
-};
-
 type DownloadFolder = {
   path: string;
   isCustom: boolean;
@@ -291,6 +287,8 @@ type PlayerActions = {
   ) => void;
   replaceQueueForAlbum: (albumId: string, tracks: TrackModel[]) => void;
   removeDeletedLocalTracks: (trackIds: string[]) => void;
+  removeFromQueue: (index: number) => void;
+  clearQueue: () => void;
   togglePlayPause: () => void;
   seekBack: () => void;
   seekNext: () => void;
@@ -302,10 +300,22 @@ type PlayerActions = {
 
 type AppPreferences = {
   previousTrackThresholdSeconds: number;
+  eqEnabled: boolean;
+  eqBass: number;
+  eqMid: number;
+  eqTreble: number;
+  eqPreset: string;
 };
 
 type PreferenceActions = {
   setPreviousTrackThreshold: (seconds: number) => Promise<void>;
+  setEqPreferences: (prefs: {
+    enabled: boolean;
+    bass: number;
+    mid: number;
+    treble: number;
+    preset: string;
+  }) => Promise<void>;
 };
 
 type DownloadActions = {
@@ -316,6 +326,30 @@ type DownloadActions = {
   openDownloadFolder: () => Promise<void>;
   retryFailedDownloads: () => Promise<void>;
   reloadDownloads: () => Promise<DownloadRepairResult | null>;
+  cancelDownload: (trackId: string) => Promise<void>;
+  cancelAllDownloads: () => Promise<void>;
+  setDownloadsPaused: (paused: boolean) => Promise<void>;
+};
+
+type PlaybackSessionPayload = {
+  album: AlbumModel | null;
+  queue: TrackModel[];
+  currentIndex: number;
+  positionSeconds: number;
+  wasPlaying: boolean;
+  isShuffleEnabled: boolean;
+  skipUnavailable: boolean;
+  baseQueueKeys: string[];
+  manualQueueKeys: string[];
+};
+
+type PlaybackPreferences = {
+  previousTrackThresholdSeconds: number;
+  eqEnabled?: boolean;
+  eqBass?: number;
+  eqMid?: number;
+  eqTreble?: number;
+  eqPreset?: string;
 };
 
 type LikedActions = {
@@ -356,6 +390,18 @@ const emptyPlayerState: PlayerState = {
 
 const defaultPreferences: AppPreferences = {
   previousTrackThresholdSeconds: 3,
+  eqEnabled: false,
+  eqBass: 0,
+  eqMid: 0,
+  eqTreble: 0,
+  eqPreset: "flat",
+};
+
+const EQ_PRESETS: Record<string, { bass: number; mid: number; treble: number }> = {
+  flat: { bass: 0, mid: 0, treble: 0 },
+  bass: { bass: 6, mid: 0, treble: -1 },
+  treble: { bass: -1, mid: 1, treble: 6 },
+  vocal: { bass: -2, mid: 4, treble: 2 },
 };
 
 function hasTauriRuntime() {
@@ -523,10 +569,13 @@ function isControlDestination(id: DestinationId) {
   return controlDestinationIds.has(id);
 }
 
-const wheelNavigationLockMs = 85;
-const wheelNavigationStreamIdleMs = 65;
+const wheelNavigationLockMs = 300;
+// Trackpad momentum tails can pause longer than the old 65ms window, which let
+// a single physical swipe re-trigger navigation (overshoot). A wider idle
+// window treats the whole momentum tail as one gesture.
+const wheelNavigationStreamIdleMs = 200;
 const wheelNavigationThresholdPx = 28;
-const playerReturnMomentumIdleMs = 180;
+const playerReturnMomentumIdleMs = 220;
 
 const destinations: Destination[] = [
   ...primaryDestinations,
@@ -785,8 +834,48 @@ async function invokeCommand<T>(
     }
     if (command === "save_previous_track_threshold") {
       return {
+        ...defaultPreferences,
         previousTrackThresholdSeconds: Number(args?.seconds ?? 3),
       } as T;
+    }
+    if (command === "save_eq_preferences") {
+      return {
+        ...defaultPreferences,
+        eqEnabled: Boolean(args?.enabled),
+        eqBass: Number(args?.bass ?? 0),
+        eqMid: Number(args?.mid ?? 0),
+        eqTreble: Number(args?.treble ?? 0),
+        eqPreset: String(args?.preset ?? "custom"),
+      } as T;
+    }
+    if (command === "load_playback_session") {
+      return null as T;
+    }
+    if (command === "save_playback_session" || command === "clear_playback_session") {
+      return undefined as T;
+    }
+    if (command === "load_cached_albums") {
+      return [] as T;
+    }
+    if (command === "load_cached_album") {
+      return null as T;
+    }
+    if (command === "sync_library_cache") {
+      return { albumCount: 0, trackCount: 0, message: "Preview only." } as T;
+    }
+    if (command === "sync_liked_tracks") {
+      return previewLikedTracks as T;
+    }
+    if (
+      command === "cancel_download" ||
+      command === "cancel_all_downloads" ||
+      command === "set_downloads_paused" ||
+      command === "get_downloads_paused"
+    ) {
+      if (command === "get_downloads_paused" || command === "set_downloads_paused") {
+        return { isPaused: Boolean(args?.paused) } as T;
+      }
+      return previewDownloads as T;
     }
     throw new Error("Open the Tauri app to use this command.");
   }
@@ -795,8 +884,35 @@ async function invokeCommand<T>(
 }
 
 function App() {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const audioARef = useRef<HTMLAudioElement | null>(null);
+  const audioBRef = useRef<HTMLAudioElement | null>(null);
+  const activeAudioSlotRef = useRef<"a" | "b">("a");
   const shouldPlayAfterSourceLoadRef = useRef(false);
+  const sessionRestoredRef = useRef(false);
+  /** When true, the next source load is skipped because gapless already swapped elements. */
+  const gaplessHandoffRef = useRef(false);
+  const eqContextRef = useRef<AudioContext | null>(null);
+  const eqFiltersRef = useRef<{
+    bass: BiquadFilterNode;
+    mid: BiquadFilterNode;
+    treble: BiquadFilterNode;
+  } | null>(null);
+  const eqSourcesRef = useRef<{
+    a: MediaElementAudioSourceNode | null;
+    b: MediaElementAudioSourceNode | null;
+  }>({ a: null, b: null });
+
+  function activeAudio() {
+    return activeAudioSlotRef.current === "a" ? audioARef.current : audioBRef.current;
+  }
+
+  function inactiveAudio() {
+    return activeAudioSlotRef.current === "a" ? audioBRef.current : audioARef.current;
+  }
+
+  function swapActiveAudioSlot() {
+    activeAudioSlotRef.current = activeAudioSlotRef.current === "a" ? "b" : "a";
+  }
   const [selectedId, setSelectedId] = useState<DestinationId>(initialPreviewDestination);
   const [homeDestinationId, setHomeDestinationId] =
     useState<DestinationId>(initialHomeDestination);
@@ -886,6 +1002,13 @@ function App() {
     () => new Set(),
   );
   const [preferences, setPreferences] = useState<AppPreferences>(defaultPreferences);
+  const [volume, setVolume] = useState(() => {
+    if (typeof window === "undefined") {
+      return 1;
+    }
+    const stored = Number(window.localStorage.getItem("nekofm.volume"));
+    return Number.isFinite(stored) && stored >= 0 && stored <= 1 ? stored : 1;
+  });
   const [serverConnectionVersion, setServerConnectionVersion] = useState(0);
   const [resetKeys, setResetKeys] = useState<Record<DestinationId, number>>({
     library: 0,
@@ -921,6 +1044,11 @@ function App() {
           previousTrackThresholdSeconds: clampPreviousTrackThreshold(
             loaded.previousTrackThresholdSeconds,
           ),
+          eqEnabled: Boolean(loaded.eqEnabled),
+          eqBass: Number(loaded.eqBass ?? 0),
+          eqMid: Number(loaded.eqMid ?? 0),
+          eqTreble: Number(loaded.eqTreble ?? 0),
+          eqPreset: String(loaded.eqPreset ?? "flat"),
         });
       } catch {
         if (isCurrent) {
@@ -1438,8 +1566,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    reloadLikedTracks();
-  }, []);
+    async function loadLiked() {
+      try {
+        const synced = await invokeCommand<LikedTrack[]>("sync_liked_tracks");
+        setLikedTracks(synced);
+      } catch {
+        await reloadLikedTracks();
+      }
+    }
+    loadLiked();
+  }, [serverConnectionVersion]);
 
   useEffect(() => {
     reloadPlaylists();
@@ -1450,14 +1586,116 @@ function App() {
   }, [player.isPlaying]);
 
   useEffect(() => {
-    const audio = audioRef.current;
+    for (const audio of [audioARef.current, audioBRef.current]) {
+      if (audio) {
+        audio.volume = volume;
+      }
+    }
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("nekofm.volume", String(volume));
+    }
+  }, [volume]);
+
+  // Wire Web Audio EQ graph once both media elements exist.
+  useEffect(() => {
+    const audioA = audioARef.current;
+    const audioB = audioBRef.current;
+    if (!audioA || !audioB || typeof window === "undefined") {
+      return;
+    }
+    if (eqContextRef.current) {
+      return;
+    }
+    try {
+      const context = new AudioContext();
+      const bass = context.createBiquadFilter();
+      bass.type = "lowshelf";
+      bass.frequency.value = 200;
+      const mid = context.createBiquadFilter();
+      mid.type = "peaking";
+      mid.frequency.value = 1000;
+      mid.Q.value = 1;
+      const treble = context.createBiquadFilter();
+      treble.type = "highshelf";
+      treble.frequency.value = 3000;
+      bass.connect(mid);
+      mid.connect(treble);
+      treble.connect(context.destination);
+      const sourceA = context.createMediaElementSource(audioA);
+      const sourceB = context.createMediaElementSource(audioB);
+      sourceA.connect(bass);
+      sourceB.connect(bass);
+      eqContextRef.current = context;
+      eqFiltersRef.current = { bass, mid, treble };
+      eqSourcesRef.current = { a: sourceA, b: sourceB };
+    } catch {
+      // Web Audio may be unavailable; playback still works without EQ.
+    }
+  }, []);
+
+  useEffect(() => {
+    const filters = eqFiltersRef.current;
+    if (!filters) {
+      return;
+    }
+    const enabled = preferences.eqEnabled;
+    filters.bass.gain.value = enabled ? preferences.eqBass : 0;
+    filters.mid.gain.value = enabled ? preferences.eqMid : 0;
+    filters.treble.gain.value = enabled ? preferences.eqTreble : 0;
+  }, [
+    preferences.eqEnabled,
+    preferences.eqBass,
+    preferences.eqMid,
+    preferences.eqTreble,
+  ]);
+
+  useEffect(() => {
+    const audio = activeAudio();
     if (!audio || !currentTrack) {
+      return;
+    }
+
+    // Gapless path already started the next element and swapped slots.
+    if (gaplessHandoffRef.current) {
+      gaplessHandoffRef.current = false;
+      setPlayer((current) => ({
+        ...current,
+        isLoading: false,
+        errorMessage: null,
+        positionSeconds: audio.currentTime || 0,
+        durationSeconds: Number.isFinite(audio.duration)
+          ? audio.duration
+          : currentTrack.durationSeconds,
+      }));
+      // Still preload the following track into the now-inactive element.
+      const followingIndex =
+        player.queue.length > 0
+          ? (player.currentIndex + 1) % player.queue.length
+          : -1;
+      const following = followingIndex >= 0 ? player.queue[followingIndex] : null;
+      const standby = inactiveAudio();
+      if (following && standby && player.queue.length > 1) {
+        void invokeCommand<PlaybackSource>("get_playback_source", {
+          trackId: following.id,
+        })
+          .then((playbackSource) => {
+            standby.src =
+              playbackSource.source === "local"
+                ? convertFileSrc(stripFileProtocol(playbackSource.uri))
+                : playbackSource.uri;
+            standby.preload = "auto";
+            standby.load();
+          })
+          .catch(() => undefined);
+      }
       return;
     }
 
     let isCurrent = true;
     const shouldAutoPlay = shouldPlayAfterSourceLoadRef.current;
-    audio.pause();
+    // Pause both elements so gapless handoff never leaves two tracks playing.
+    audioARef.current?.pause();
+    audioBRef.current?.pause();
     setPlayer((current) => ({
       ...current,
       isLoading: true,
@@ -1467,20 +1705,30 @@ function App() {
       source: null,
     }));
 
+    async function resolveUri(trackId: string) {
+      const playbackSource = await invokeCommand<PlaybackSource>("get_playback_source", {
+        trackId,
+      });
+      return {
+        uri:
+          playbackSource.source === "local"
+            ? convertFileSrc(stripFileProtocol(playbackSource.uri))
+            : playbackSource.uri,
+        source: playbackSource.source === "local" ? ("local" as const) : ("stream" as const),
+      };
+    }
+
     async function loadStream() {
       try {
-        const playbackSource = await invokeCommand<PlaybackSource>("get_playback_source", {
-          trackId: currentTrack.id,
-        });
+        const playbackSource = await resolveUri(currentTrack.id);
         if (!isCurrent || !audio) {
           return;
         }
 
-        audio.src = playbackSource.source === "local"
-          ? convertFileSrc(stripFileProtocol(playbackSource.uri))
-          : playbackSource.uri;
+        audio.src = playbackSource.uri;
         audio.currentTime = 0;
         if (shouldAutoPlay) {
+          await eqContextRef.current?.resume().catch(() => undefined);
           await audio.play();
         } else {
           audio.load();
@@ -1490,12 +1738,33 @@ function App() {
           isPlaying: shouldAutoPlay,
           isLoading: false,
           errorMessage: null,
-          source: playbackSource.source === "local" ? "local" : "stream",
+          source: playbackSource.source,
           sourceByQueueKey: {
             ...current.sourceByQueueKey,
-            [currentQueueKey ?? queueTrackKey(currentTrack)]: playbackSource.source === "local" ? "local" : "stream",
+            [currentQueueKey ?? queueTrackKey(currentTrack)]: playbackSource.source,
           },
         }));
+
+        // Gapless: preload the next track into the inactive element.
+        const nextIndex =
+          player.queue.length > 0
+            ? (player.currentIndex + 1) % player.queue.length
+            : -1;
+        const nextTrack = nextIndex >= 0 ? player.queue[nextIndex] : null;
+        const standby = inactiveAudio();
+        if (nextTrack && standby && player.queue.length > 1) {
+          try {
+            const nextSource = await resolveUri(nextTrack.id);
+            if (!isCurrent) {
+              return;
+            }
+            standby.src = nextSource.uri;
+            standby.preload = "auto";
+            standby.load();
+          } catch {
+            // Preload failures are non-fatal; next track still loads on advance.
+          }
+        }
       } catch (error) {
         if (!isCurrent) {
           return;
@@ -1571,6 +1840,143 @@ function App() {
       isCurrent = false;
     };
   }, [sourceLoadKey]);
+
+  // Near-end gapless handoff: start preloaded next element slightly before end.
+  useEffect(() => {
+    const audio = activeAudio();
+    if (!audio || !currentTrack || player.queue.length < 2) {
+      return;
+    }
+
+    const handleTimeUpdate = () => {
+      if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+        return;
+      }
+      const remaining = audio.duration - audio.currentTime;
+      if (remaining > 0.12 || remaining < 0) {
+        return;
+      }
+      const standby = inactiveAudio();
+      if (!standby?.src || standby.readyState < 2) {
+        return;
+      }
+      // Swap slots so the next sourceLoadKey-driven load uses the other element
+      // only when advanceQueue runs; here we start standby and advance state.
+      if (standby.paused && player.isPlaying) {
+        gaplessHandoffRef.current = true;
+        void standby.play().catch(() => {
+          gaplessHandoffRef.current = false;
+        });
+        audio.pause();
+        swapActiveAudioSlot();
+        advanceQueue();
+      }
+    };
+
+    audio.addEventListener("timeupdate", handleTimeUpdate);
+    return () => {
+      audio.removeEventListener("timeupdate", handleTimeUpdate);
+    };
+  }, [sourceLoadKey, player.isPlaying, player.queue.length, currentTrack?.id]);
+
+  // Persist playback session for resume-on-launch.
+  useEffect(() => {
+    if (!hasTauriRuntime() || !sessionRestoredRef.current) {
+      return;
+    }
+    if (!player.album || player.queue.length === 0) {
+      void invokeCommand("clear_playback_session").catch(() => undefined);
+      return;
+    }
+    const handle = window.setTimeout(() => {
+      const session: PlaybackSessionPayload = {
+        album: player.album,
+        queue: player.queue,
+        currentIndex: player.currentIndex,
+        positionSeconds: player.positionSeconds,
+        wasPlaying: player.isPlaying,
+        isShuffleEnabled: player.isShuffleEnabled,
+        skipUnavailable: player.skipUnavailable,
+        baseQueueKeys: player.baseQueueKeys,
+        manualQueueKeys: player.manualQueueKeys,
+      };
+      void invokeCommand("save_playback_session", { session }).catch(() => undefined);
+    }, 400);
+    return () => window.clearTimeout(handle);
+  }, [
+    player.album,
+    player.queue,
+    player.currentIndex,
+    player.positionSeconds,
+    player.isPlaying,
+    player.isShuffleEnabled,
+    player.skipUnavailable,
+    player.baseQueueKeys,
+    player.manualQueueKeys,
+  ]);
+
+  // Restore last session once after preferences load.
+  useEffect(() => {
+    if (!hasTauriRuntime() || sessionRestoredRef.current) {
+      return;
+    }
+    let cancelled = false;
+    async function restore() {
+      try {
+        const session = await invokeCommand<PlaybackSessionPayload | null>(
+          "load_playback_session",
+        );
+        if (cancelled || !session || !session.album || session.queue.length === 0) {
+          sessionRestoredRef.current = true;
+          return;
+        }
+        const safeIndex = Math.min(
+          Math.max(session.currentIndex, 0),
+          session.queue.length - 1,
+        );
+        shouldPlayAfterSourceLoadRef.current = false;
+        setPlayer((current) => ({
+          ...current,
+          album: session.album,
+          queue: session.queue,
+          currentIndex: safeIndex,
+          isPlaying: false,
+          isLoading: true,
+          isShuffleEnabled: session.isShuffleEnabled,
+          skipUnavailable: session.skipUnavailable,
+          positionSeconds: session.positionSeconds,
+          durationSeconds: session.queue[safeIndex]?.durationSeconds ?? 0,
+          errorMessage: null,
+          source: null,
+          sourceByQueueKey: sourceMapForTracks(session.queue, downloads),
+          baseQueueKeys: session.baseQueueKeys.length
+            ? session.baseQueueKeys
+            : session.queue.map(queueTrackKey),
+          manualQueueKeys: session.manualQueueKeys ?? [],
+          playbackRequestId: current.playbackRequestId + 1,
+        }));
+        // Seek after source loads.
+        window.setTimeout(() => {
+          const audio = activeAudio();
+          if (audio && session.positionSeconds > 0) {
+            audio.currentTime = session.positionSeconds;
+            setPlayer((current) => ({
+              ...current,
+              positionSeconds: session.positionSeconds,
+            }));
+          }
+        }, 700);
+      } catch {
+        // Ignore restore failures.
+      } finally {
+        sessionRestoredRef.current = true;
+      }
+    }
+    void restore();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const playerActions: PlayerActions = {
     playAlbum(album, tracks, startIndex, options) {
@@ -1659,10 +2065,13 @@ function App() {
           return current;
         }
         if (keptQueue.length === 0) {
-          audioRef.current?.pause();
-          if (audioRef.current) {
-            audioRef.current.removeAttribute("src");
-            audioRef.current.load();
+          audioARef.current?.pause();
+          audioBRef.current?.pause();
+          for (const audio of [audioARef.current, audioBRef.current]) {
+            if (audio) {
+              audio.removeAttribute("src");
+              audio.load();
+            }
           }
           return emptyPlayerState;
         }
@@ -1708,8 +2117,55 @@ function App() {
         };
       });
     },
+    removeFromQueue(index) {
+      setPlayer((current) => {
+        if (index < 0 || index >= current.queue.length) {
+          return current;
+        }
+        if (current.queue.length === 1) {
+          audioARef.current?.pause();
+          audioBRef.current?.pause();
+          return { ...emptyPlayerState };
+        }
+        const removed = current.queue[index];
+        const removedKey = queueTrackKey(removed);
+        const queue = current.queue.filter((_, i) => i !== index);
+        let currentIndex = current.currentIndex;
+        if (index < current.currentIndex) {
+          currentIndex -= 1;
+        } else if (index === current.currentIndex) {
+          currentIndex = Math.min(current.currentIndex, queue.length - 1);
+        }
+        const nextSourceByQueueKey = { ...current.sourceByQueueKey };
+        delete nextSourceByQueueKey[removedKey];
+        return {
+          ...current,
+          queue,
+          currentIndex,
+          baseQueueKeys: current.baseQueueKeys.filter((key) => key !== removedKey),
+          manualQueueKeys: current.manualQueueKeys.filter((key) => key !== removedKey),
+          sourceByQueueKey: nextSourceByQueueKey,
+          playbackRequestId:
+            index === current.currentIndex
+              ? current.playbackRequestId + 1
+              : current.playbackRequestId,
+          positionSeconds: index === current.currentIndex ? 0 : current.positionSeconds,
+        };
+      });
+    },
+    clearQueue() {
+      audioARef.current?.pause();
+      audioBRef.current?.pause();
+      for (const audio of [audioARef.current, audioBRef.current]) {
+        if (audio) {
+          audio.removeAttribute("src");
+          audio.load();
+        }
+      }
+      setPlayer({ ...emptyPlayerState });
+    },
     togglePlayPause() {
-      const audio = audioRef.current;
+      const audio = activeAudio();
       if (!audio || !currentTrack) {
         return;
       }
@@ -1720,6 +2176,7 @@ function App() {
         return;
       }
 
+      void eqContextRef.current?.resume().catch(() => undefined);
       audio.play().catch((error) => {
         setPlayer((current) => ({
           ...current,
@@ -1730,7 +2187,7 @@ function App() {
       setPlayer((current) => ({ ...current, isPlaying: true }));
     },
     seekBack() {
-      const audio = audioRef.current;
+      const audio = activeAudio();
       if (!audio || !currentTrack) {
         return;
       }
@@ -1782,7 +2239,7 @@ function App() {
       advanceQueue();
     },
     seekTo(seconds) {
-      const audio = audioRef.current;
+      const audio = activeAudio();
       if (!audio) {
         return;
       }
@@ -1795,7 +2252,7 @@ function App() {
       if (index < 0 || index >= player.queue.length) {
         return;
       }
-      const audio = audioRef.current;
+      const audio = activeAudio();
       if (audio) {
         audio.currentTime = 0;
       }
@@ -1929,18 +2386,86 @@ function App() {
   const preferenceActions: PreferenceActions = {
     async setPreviousTrackThreshold(seconds) {
       const safeSeconds = clampPreviousTrackThreshold(seconds);
-      setPreferences({ previousTrackThresholdSeconds: safeSeconds });
+      setPreferences((current) => ({
+        ...current,
+        previousTrackThresholdSeconds: safeSeconds,
+      }));
       const saved = await invokeCommand<PlaybackPreferences>(
         "save_previous_track_threshold",
         { seconds: safeSeconds },
       );
-      setPreferences({
+      setPreferences((current) => ({
+        ...current,
         previousTrackThresholdSeconds: clampPreviousTrackThreshold(
           saved.previousTrackThresholdSeconds,
         ),
+        eqEnabled: Boolean(saved.eqEnabled ?? current.eqEnabled),
+        eqBass: Number(saved.eqBass ?? current.eqBass),
+        eqMid: Number(saved.eqMid ?? current.eqMid),
+        eqTreble: Number(saved.eqTreble ?? current.eqTreble),
+        eqPreset: String(saved.eqPreset ?? current.eqPreset),
+      }));
+    },
+    async setEqPreferences(prefs) {
+      setPreferences((current) => ({
+        ...current,
+        eqEnabled: prefs.enabled,
+        eqBass: prefs.bass,
+        eqMid: prefs.mid,
+        eqTreble: prefs.treble,
+        eqPreset: prefs.preset,
+      }));
+      const saved = await invokeCommand<PlaybackPreferences>("save_eq_preferences", {
+        enabled: prefs.enabled,
+        bass: prefs.bass,
+        mid: prefs.mid,
+        treble: prefs.treble,
+        preset: prefs.preset,
       });
+      setPreferences((current) => ({
+        ...current,
+        previousTrackThresholdSeconds: clampPreviousTrackThreshold(
+          saved.previousTrackThresholdSeconds ?? current.previousTrackThresholdSeconds,
+        ),
+        eqEnabled: Boolean(saved.eqEnabled),
+        eqBass: Number(saved.eqBass ?? 0),
+        eqMid: Number(saved.eqMid ?? 0),
+        eqTreble: Number(saved.eqTreble ?? 0),
+        eqPreset: String(saved.eqPreset ?? "flat"),
+      }));
     },
   };
+
+  // Media Session next/previous (play/pause already works on macOS).
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("mediaSession" in navigator)) {
+      return;
+    }
+    const mediaSession = navigator.mediaSession;
+    try {
+      mediaSession.setActionHandler("play", () => playerActions.togglePlayPause());
+      mediaSession.setActionHandler("pause", () => playerActions.togglePlayPause());
+      mediaSession.setActionHandler("previoustrack", () => playerActions.seekBack());
+      mediaSession.setActionHandler("nexttrack", () => playerActions.seekNext());
+    } catch {
+      // ignore
+    }
+    if (currentTrack) {
+      try {
+        mediaSession.metadata = new MediaMetadata({
+          title: currentTrack.title,
+          artist: currentTrack.artist,
+          album: player.album?.name,
+          artwork: currentTrack.coverArtUri
+            ? [{ src: currentTrack.coverArtUri, sizes: "512x512", type: "image/jpeg" }]
+            : undefined,
+        });
+        mediaSession.playbackState = player.isPlaying ? "playing" : "paused";
+      } catch {
+        // ignore metadata failures
+      }
+    }
+  }, [currentTrack, player.isPlaying, player.album?.name, playerActions]);
 
   const downloadActions: DownloadActions = {
     async downloadTrack(track) {
@@ -1992,6 +2517,25 @@ function App() {
         .filter((download) => download.state === "failed")
         .map(downloadToTrack);
       await downloadActions.downloadTracks(failedTracks);
+    },
+    async cancelDownload(trackId) {
+      const updated = await invokeCommand<DownloadedTrack[]>("cancel_download", {
+        trackId,
+      });
+      setDownloads(updated);
+      setActiveDownloadTrackIds((current) => {
+        const next = new Set(current);
+        next.delete(trackId);
+        return next;
+      });
+    },
+    async cancelAllDownloads() {
+      const updated = await invokeCommand<DownloadedTrack[]>("cancel_all_downloads");
+      setDownloads(updated);
+      setActiveDownloadTrackIds(new Set());
+    },
+    async setDownloadsPaused(paused) {
+      await invokeCommand("set_downloads_paused", { paused });
     },
     reloadDownloads,
   };
@@ -2248,9 +2792,13 @@ function App() {
     <div className="app-shell">
       <main className="shell-main">
         <audio
-          ref={audioRef}
-          preload="metadata"
+          ref={audioARef}
+          preload="auto"
+          crossOrigin="anonymous"
           onTimeUpdate={(event) => {
+            if (activeAudioSlotRef.current !== "a") {
+              return;
+            }
             const audio = event.currentTarget;
             setPlayer((current) => ({
               ...current,
@@ -2261,6 +2809,9 @@ function App() {
             }));
           }}
           onLoadedMetadata={(event) => {
+            if (activeAudioSlotRef.current !== "a") {
+              return;
+            }
             const audio = event.currentTarget;
             setPlayer((current) => ({
               ...current,
@@ -2269,9 +2820,66 @@ function App() {
                 : current.durationSeconds,
             }));
           }}
-          onEnded={() => advanceQueue()}
-          onPlay={() => setPlayer((current) => ({ ...current, isPlaying: true }))}
-          onPause={() => setPlayer((current) => ({ ...current, isPlaying: false }))}
+          onEnded={() => {
+            if (activeAudioSlotRef.current === "a") {
+              advanceQueue();
+            }
+          }}
+          onPlay={() => {
+            if (activeAudioSlotRef.current === "a") {
+              setPlayer((current) => ({ ...current, isPlaying: true }));
+            }
+          }}
+          onPause={() => {
+            if (activeAudioSlotRef.current === "a") {
+              setPlayer((current) => ({ ...current, isPlaying: false }));
+            }
+          }}
+        />
+        <audio
+          ref={audioBRef}
+          preload="auto"
+          crossOrigin="anonymous"
+          onTimeUpdate={(event) => {
+            if (activeAudioSlotRef.current !== "b") {
+              return;
+            }
+            const audio = event.currentTarget;
+            setPlayer((current) => ({
+              ...current,
+              positionSeconds: audio.currentTime,
+              durationSeconds: Number.isFinite(audio.duration)
+                ? audio.duration
+                : current.durationSeconds,
+            }));
+          }}
+          onLoadedMetadata={(event) => {
+            if (activeAudioSlotRef.current !== "b") {
+              return;
+            }
+            const audio = event.currentTarget;
+            setPlayer((current) => ({
+              ...current,
+              durationSeconds: Number.isFinite(audio.duration)
+                ? audio.duration
+                : current.durationSeconds,
+            }));
+          }}
+          onEnded={() => {
+            if (activeAudioSlotRef.current === "b") {
+              advanceQueue();
+            }
+          }}
+          onPlay={() => {
+            if (activeAudioSlotRef.current === "b") {
+              setPlayer((current) => ({ ...current, isPlaying: true }));
+            }
+          }}
+          onPause={() => {
+            if (activeAudioSlotRef.current === "b") {
+              setPlayer((current) => ({ ...current, isPlaying: false }));
+            }
+          }}
         />
         <section
           ref={shellPageRef}
@@ -2383,6 +2991,7 @@ function App() {
               onOpenPlayer={openPlayerFromMiniPlayer}
             />
           ) : null}
+          <VolumeBar volume={volume} onChange={setVolume} />
         </section>
       </main>
     </div>
@@ -2658,7 +3267,25 @@ function LibraryPlaceholder({
       setAlbums(result);
       setDownloadedAlbumDetails({});
       setIsDownloadedLibrary(false);
+      // Background full-library track crawl for offline browse.
+      void invokeCommand("sync_library_cache").catch(() => undefined);
     } catch (error) {
+      try {
+        const cached = await invokeCommand<AlbumModel[]>("load_cached_albums");
+        if (cached.length > 0) {
+          setAlbums(cached);
+          setDownloadedAlbumDetails({});
+          setIsDownloadedLibrary(false);
+          setLibraryError(null);
+          setShuffleNotice({
+            tone: "warning",
+            message: "Server offline. Showing cached library metadata.",
+          });
+          return;
+        }
+      } catch {
+        // fall through to downloads
+      }
       try {
         const downloadedDetails = await invokeCommand<AlbumDetailModel[]>(
           "load_downloaded_album_details",
@@ -2699,6 +3326,18 @@ function LibraryPlaceholder({
       });
       setAlbumDetail(result);
     } catch (error) {
+      try {
+        const cached = await invokeCommand<AlbumDetailModel | null>("load_cached_album", {
+          albumId: album.id,
+        });
+        if (cached) {
+          setAlbumDetail(cached);
+          setDetailError(null);
+          return;
+        }
+      } catch {
+        // ignore
+      }
       setDetailError(String(error));
     } finally {
       setIsLoadingDetail(false);
@@ -3807,27 +4446,42 @@ function QueueList({
   actions: PlayerActions;
   downloads: DownloadedTrack[];
 }) {
-  const indexes = visibleQueueIndexes(player.currentIndex, player.queue.length);
   const localTrackIds = new Set(
     downloads
       .filter((download) => download.state === "complete")
       .map((download) => download.trackId),
   );
+  const manualKeySet = new Set(player.manualQueueKeys);
 
   return (
     <section className="queue-list">
-      <header>
-        <h2>Queue</h2>
-        <p>{player.album?.name ?? "Queue"}</p>
+      <header className="queue-list-header">
+        <div>
+          <h2>Queue</h2>
+          <p>
+            {player.queue.length} {player.queue.length === 1 ? "song" : "songs"}
+            {player.album?.name ? ` • ${player.album.name}` : ""}
+          </p>
+        </div>
+        <button
+          type="button"
+          className="queue-clear-button"
+          disabled={player.queue.length === 0}
+          onClick={() => actions.clearQueue()}
+        >
+          Clear queue
+        </button>
       </header>
       <div className="queue-rows">
-        {indexes.map((queueIndex, visibleIndex) => {
-          const track = player.queue[queueIndex];
-          const isCurrent = visibleIndex === 0;
+        {player.queue.map((track, queueIndex) => {
+          const isCurrent = queueIndex === player.currentIndex;
           const isKnownLocal = localTrackIds.has(track.id);
-          const knownSource = player.sourceByQueueKey[queueTrackKey(track)] ?? (isKnownLocal ? "local" : null);
+          const knownSource =
+            player.sourceByQueueKey[queueTrackKey(track)] ??
+            (isKnownLocal ? "local" : null);
+          const isPlayNext = manualKeySet.has(queueTrackKey(track));
           const subtitleParts = [
-            isCurrent ? "Now playing" : "Next",
+            isCurrent ? "Now playing" : isPlayNext ? "Play next" : `#${queueIndex + 1}`,
             track.artist,
             formatDuration(track.durationSeconds),
             isCurrent && player.source === "local" ? "Local" : null,
@@ -3836,34 +4490,35 @@ function QueueList({
             !isCurrent && knownSource === "stream" ? "Streaming" : null,
           ].filter(Boolean);
           return (
-            <button
-              key={`${track.id}-${queueIndex}-${visibleIndex}`}
-              type="button"
-              className={`queue-row ${isCurrent ? "is-playing" : ""}`}
-              onClick={() => actions.seekToQueueIndex(queueIndex)}
+            <div
+              key={`${queueTrackKey(track)}-${queueIndex}`}
+              className={`queue-row-wrap ${isCurrent ? "is-playing" : ""}`}
             >
-              {isCurrent ? <AudioLines size={20} /> : <Music2 size={20} />}
-              <div>
-                <strong>{track.title}</strong>
-                <span>{subtitleParts.join(" • ")}</span>
-              </div>
-            </button>
+              <button
+                type="button"
+                className={`queue-row ${isCurrent ? "is-playing" : ""}`}
+                onClick={() => actions.seekToQueueIndex(queueIndex)}
+              >
+                {isCurrent ? <AudioLines size={20} /> : <Music2 size={20} />}
+                <div>
+                  <strong>{track.title}</strong>
+                  <span>{subtitleParts.join(" • ")}</span>
+                </div>
+              </button>
+              <button
+                type="button"
+                className="queue-remove-button"
+                aria-label={`Remove ${track.title} from queue`}
+                title="Remove from queue"
+                onClick={() => actions.removeFromQueue(queueIndex)}
+              >
+                <X size={16} />
+              </button>
+            </div>
           );
         })}
       </div>
     </section>
-  );
-}
-
-function visibleQueueIndexes(currentIndex: number, queueLength: number) {
-  if (queueLength <= 0) {
-    return [];
-  }
-
-  // The queue always loops, so the visible window always wraps around.
-  const visibleCount = Math.min(10, queueLength);
-  return Array.from({ length: visibleCount }, (_, offset) =>
-    (currentIndex + offset) % queueLength,
   );
 }
 
@@ -4177,6 +4832,7 @@ function LikedPage({
     useState<LocalDownloadDeleteDialogState | null>(null);
   const [reorderDraft, setReorderDraft] = useState<LikedTrack[]>([]);
   const [circularActiveIndex, setCircularActiveIndex] = useState(0);
+  const [searchQuery, setSearchQuery] = useState<string | null>(null);
   const downloadsByTrackId = useMemo(
     () => new Map(downloads.map((download) => [download.trackId, download])),
     [downloads],
@@ -4188,7 +4844,26 @@ function LikedPage({
     ? tracks.filter((track) => downloadsByTrackId.get(track.id)?.state === "complete")
     : tracks;
 
-  const circularItems = visibleLikedTracks.map((liked, index) => {
+  // In search mode the circle keeps only matching songs; playback still uses
+  // the full liked list, so items keep their full-list index.
+  const filteredLikedTracks = useMemo(() => {
+    if (searchQuery === null) {
+      return visibleLikedTracks;
+    }
+    const query = searchQuery.trim().toLowerCase();
+    if (!query) {
+      return visibleLikedTracks;
+    }
+    return visibleLikedTracks.filter(
+      (liked) =>
+        liked.title.toLowerCase().includes(query) ||
+        liked.artist.toLowerCase().includes(query) ||
+        (liked.albumName ?? "").toLowerCase().includes(query),
+    );
+  }, [visibleLikedTracks, searchQuery]);
+
+  const circularItems = filteredLikedTracks.map((liked) => {
+    const index = visibleLikedTracks.indexOf(liked);
     const download = downloadsByTrackId.get(liked.trackId) ?? null;
     const isComplete = download?.state === "complete";
     const track = likedToPlayableTrack(liked);
@@ -4207,18 +4882,18 @@ function LikedPage({
 
   useEffect(() => {
     setCircularActiveIndex((current) => {
-      if (visibleLikedTracks.length === 0) {
+      if (filteredLikedTracks.length === 0) {
         return 0;
       }
-      return ((current % visibleLikedTracks.length) + visibleLikedTracks.length) % visibleLikedTracks.length;
+      return ((current % filteredLikedTracks.length) + filteredLikedTracks.length) % filteredLikedTracks.length;
     });
-  }, [visibleLikedTracks.length]);
+  }, [filteredLikedTracks.length]);
 
   useEffect(() => {
     if (isReordering || player.album?.id !== "liked" || !currentTrack) {
       return;
     }
-    const playingLikedIndex = visibleLikedTracks.findIndex(
+    const playingLikedIndex = filteredLikedTracks.findIndex(
       (liked) => liked.trackId === currentTrack.id,
     );
     if (playingLikedIndex >= 0) {
@@ -4228,7 +4903,7 @@ function LikedPage({
     currentTrack?.id,
     isReordering,
     player.album?.id,
-    visibleLikedTracks,
+    filteredLikedTracks,
   ]);
 
   useEffect(() => {
@@ -4450,6 +5125,19 @@ function LikedPage({
       <CircularLikedScroller
         activeIndex={circularActiveIndex}
         items={circularItems}
+        searchQuery={searchQuery}
+        onSearchOpen={() => setSearchQuery("")}
+        onSearchQueryChange={setSearchQuery}
+        onSearchClose={() => setSearchQuery(null)}
+        playbackFraction={
+          player.queue.length > 0
+            ? (player.currentIndex +
+                (player.durationSeconds > 0
+                  ? Math.min(1, Math.max(0, player.positionSeconds / player.durationSeconds))
+                  : 0)) /
+              player.queue.length
+            : null
+        }
         onActiveIndexChange={setCircularActiveIndex}
         onPlayIndex={playLikedFrom}
         onQueueIndex={(index) => {
@@ -4708,6 +5396,11 @@ function circularScrollerDistance(slot: number) {
 function CircularLikedScroller({
   activeIndex,
   items,
+  searchQuery,
+  onSearchOpen,
+  onSearchQueryChange,
+  onSearchClose,
+  playbackFraction,
   onActiveIndexChange,
   onPlayIndex,
   onQueueIndex,
@@ -4716,6 +5409,11 @@ function CircularLikedScroller({
 }: {
   activeIndex: number;
   items: CircularLikedItem[];
+  searchQuery: string | null;
+  onSearchOpen: () => void;
+  onSearchQueryChange: (query: string) => void;
+  onSearchClose: () => void;
+  playbackFraction: number | null;
   onActiveIndexChange: (index: number) => void;
   onPlayIndex: (index: number) => void;
   onQueueIndex: (index: number) => void;
@@ -4726,7 +5424,10 @@ function CircularLikedScroller({
   const [isInteracting, setIsInteracting] = useState(false);
   const [flippedItemIndex, setFlippedItemIndex] = useState<number | null>(null);
   const [queuedFlashItemIndex, setQueuedFlashItemIndex] = useState<number | null>(null);
+  const [isScrollbarDragging, setIsScrollbarDragging] = useState(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const playbackDistanceRef = useRef<number | null>(null);
   const pendingTapRef = useRef<{
     itemIndex: number;
     playIndex: number;
@@ -4761,6 +5462,14 @@ function CircularLikedScroller({
   const activeItem = items[nearestIndex] ?? items[0];
   const wheelItems = items.flatMap((item, itemIndex) => {
     let slot = itemIndex - normalizedPosition;
+    if (items.length <= circularScrollerSlotCount) {
+      // Few songs fill the whole circle, so every card stays visible and
+      // simply wraps around — there is no exiting/entering position.
+      slot = ((slot % items.length) + items.length) % items.length;
+      // Cards travel to the nearest side when clicked.
+      const travelSlot = slot > items.length / 2 ? slot - items.length : slot;
+      return [{ item, itemIndex, slot, travelSlot }];
+    }
     while (slot < -1) {
       slot += items.length;
     }
@@ -4769,9 +5478,21 @@ function CircularLikedScroller({
     }
     return slot > circularScrollerSlotCount || slot < -1
       ? []
-      : [{ item, itemIndex, slot }];
+      : [{ item, itemIndex, slot, travelSlot: slot }];
   });
-  const centerItems = wheelItems.filter(({ slot }) => slot > -1 && slot < 1);
+  // The center title crossfade needs the signed nearest offset so the
+  // outgoing song fades out smoothly in both wrap directions.
+  const centerItems = items.flatMap((item, itemIndex) => {
+    if (items.length === 0) {
+      return [];
+    }
+    let slot = itemIndex - normalizedPosition;
+    slot = ((slot % items.length) + items.length) % items.length;
+    if (slot > items.length / 2) {
+      slot -= items.length;
+    }
+    return slot > -1 && slot < 1 ? [{ item, slot }] : [];
+  });
 
   useEffect(() => {
     if (!dragRef.current && items.length > 0) {
@@ -4840,6 +5561,38 @@ function CircularLikedScroller({
     // item indexes, so any open flip is closed when the list changes.
     setFlippedItemIndex(null);
   }, [items.length]);
+
+  const isSearching = searchQuery !== null;
+
+  useEffect(() => {
+    if (isSearching) {
+      searchInputRef.current?.focus();
+    }
+  }, [isSearching]);
+
+  // Playback-depth dot: 0 = 12 o'clock, one full lap = the whole playlist.
+  // Track a cumulative distance so wrapping keeps spinning forward and
+  // shuffle jumps always animate along the shortest arc.
+  let playbackDistance: number | null = null;
+  if (playbackFraction !== null && items.length > 0) {
+    const target = ((playbackFraction % 1) + 1) % 1 * 100;
+    const previous = playbackDistanceRef.current;
+    if (previous === null) {
+      playbackDistance = target;
+    } else {
+      const previousOnCircle = ((previous % 100) + 100) % 100;
+      let delta = target - previousOnCircle;
+      if (delta > 50) {
+        delta -= 100;
+      } else if (delta < -50) {
+        delta += 100;
+      }
+      playbackDistance = previous + delta;
+    }
+    playbackDistanceRef.current = playbackDistance;
+  } else {
+    playbackDistanceRef.current = null;
+  }
 
   useEffect(() => {
     // macOS trackpads report a hard "force press" through WebKit-specific
@@ -5131,9 +5884,55 @@ function CircularLikedScroller({
     snapToNearest(wheelPositionRef.current);
   }
 
-  if (!activeItem) {
+  function handleScrollbarPointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || items.length < 2) {
+      return;
+    }
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setIsScrollbarDragging(true);
+    setIsInteracting(true);
+    cancelPlaybackAnimation();
+    applyScrollbarPosition(event);
+  }
+
+  function handleScrollbarPointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (isScrollbarDragging) {
+      applyScrollbarPosition(event);
+    }
+  }
+
+  function handleScrollbarPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!isScrollbarDragging) {
+      return;
+    }
+    setIsScrollbarDragging(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    snapToNearest(wheelPositionRef.current);
+  }
+
+  function applyScrollbarPosition(event: ReactPointerEvent<HTMLDivElement>) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    if (bounds.height <= 0) {
+      return;
+    }
+    const fraction = Math.min(
+      1,
+      Math.max(0, (event.clientY - bounds.top) / bounds.height),
+    );
+    const target = fraction * Math.max(items.length - 1, 0);
+    wheelPositionRef.current = target;
+    setWheelPosition(target);
+  }
+
+  if (!activeItem && !isSearching) {
     return null;
   }
+
+  const scrollbarFraction =
+    items.length > 1 ? nearestIndex / (items.length - 1) : 0;
 
   return (
     <div
@@ -5149,30 +5948,71 @@ function CircularLikedScroller({
       data-no-page-drag
     >
       <div className="liked-circular-center" aria-live="polite">
-        {centerItems.map(({ item, slot }) => {
-          const centerVisibility = 1 - Math.abs(slot);
-          const metadataVisibility =
-            centerVisibility * centerVisibility * centerVisibility;
-          const style = {
-            "--center-opacity": centerVisibility,
-            "--center-metadata-opacity": metadataVisibility,
-            "--center-title-offset": `${slot >= 0 ? slot * -92 : slot * -22}px`,
-          } as CSSProperties;
-          return (
-            <span
-              className="liked-circular-center-item"
-              key={item.liked.trackId}
-              style={style}
-            >
-              <strong>{item.track.title}</strong>
-              <span>{item.track.albumName || "Unknown album"}</span>
-              <span>{item.track.artist || "Unknown artist"}</span>
+        {isSearching ? (
+          <span className="liked-circular-search" data-no-page-swipe>
+            <input
+              ref={searchInputRef}
+              className="liked-circular-search-input"
+              value={searchQuery ?? ""}
+              aria-label="Search songs by title, artist or album"
+              spellCheck={false}
+              autoComplete="off"
+              onChange={(event) => onSearchQueryChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  onSearchClose();
+                }
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+            />
+            <span className="liked-circular-search-hint">
+              {items.length === 0
+                ? "No matching songs"
+                : `${items.length} ${items.length === 1 ? "song" : "songs"} — Esc to exit`}
             </span>
-          );
-        })}
+          </span>
+        ) : (
+          <>
+            {centerItems.map(({ item, slot }) => {
+              const centerVisibility = 1 - Math.abs(slot);
+              const metadataVisibility =
+                centerVisibility * centerVisibility * centerVisibility;
+              const style = {
+                "--center-opacity": centerVisibility,
+                "--center-metadata-opacity": metadataVisibility,
+                "--center-title-offset": `${slot >= 0 ? slot * -92 : slot * -22}px`,
+              } as CSSProperties;
+              return (
+                <span
+                  className="liked-circular-center-item"
+                  key={item.liked.trackId}
+                  style={style}
+                >
+                  <strong>{item.track.title}</strong>
+                  <span>{item.track.albumName || "Unknown album"}</span>
+                  <span>{item.track.artist || "Unknown artist"}</span>
+                </span>
+              );
+            })}
+            <button
+              type="button"
+              className="liked-circular-search-trigger"
+              aria-label="Search songs"
+              title="Search songs"
+              onClick={() => {
+                if (suppressClickRef.current) {
+                  suppressClickRef.current = false;
+                  return;
+                }
+                onSearchOpen();
+              }}
+            />
+          </>
+        )}
       </div>
 
-      {wheelItems.map(({ item, itemIndex, slot }) => {
+      {wheelItems.map(({ item, itemIndex, slot, travelSlot }) => {
         // With fewer songs than slots, stretch the spacing so the cards sit
         // symmetrically around the whole circle.
         const slotScale =
@@ -5200,12 +6040,12 @@ function CircularLikedScroller({
             aria-label={`${item.track.title} by ${item.track.artist}`}
             data-item-index={itemIndex}
             data-play-index={item.index}
-            data-slot={slot}
+            data-slot={travelSlot}
             title={item.isUnavailableOffline ? "Not downloaded and unavailable offline" : undefined}
             onKeyDown={(event) => {
               if (event.key === "Enter" || event.key === " ") {
                 event.preventDefault();
-                handleCardTap({ itemIndex, playIndex: item.index, slot });
+                handleCardTap({ itemIndex, playIndex: item.index, slot: travelSlot });
               }
             }}
           >
@@ -5263,6 +6103,37 @@ function CircularLikedScroller({
           </div>
         );
       })}
+
+      {playbackDistance !== null ? (
+        <span
+          className="liked-circular-progress-dot"
+          style={{ "--progress-distance": `${75 + playbackDistance}%` } as CSSProperties}
+          aria-hidden="true"
+        />
+      ) : null}
+
+      <div
+        className={`liked-circular-scrollbar ${isScrollbarDragging ? "is-dragging" : ""}`}
+        data-no-page-swipe
+        onPointerDown={handleScrollbarPointerDown}
+        onPointerMove={handleScrollbarPointerMove}
+        onPointerUp={handleScrollbarPointerUp}
+        onPointerCancel={handleScrollbarPointerUp}
+        role="slider"
+        aria-label="Scroll through songs"
+        aria-orientation="vertical"
+        aria-valuemin={1}
+        aria-valuemax={Math.max(items.length, 1)}
+        aria-valuenow={Math.min(nearestIndex + 1, Math.max(items.length, 1))}
+        tabIndex={items.length > 1 ? 0 : -1}
+      >
+        <div className="liked-circular-scrollbar-track">
+          <div
+            className="liked-circular-scrollbar-thumb"
+            style={{ top: `calc(${scrollbarFraction} * (100% - 38px))` }}
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -6220,6 +7091,12 @@ function DownloadsPage({
   );
   const [pendingExportModeChoice, setPendingExportModeChoice] =
     useState<PendingExportModeChoice | null>(null);
+  const [downloadsPaused, setDownloadsPaused] = useState(false);
+  useEffect(() => {
+    void invokeCommand<{ isPaused: boolean }>("get_downloads_paused")
+      .then((status) => setDownloadsPaused(Boolean(status.isPaused)))
+      .catch(() => undefined);
+  }, []);
   const groups = groupDownloadsByAlbum(downloads);
   const expandedGroupKeys =
     expandedDownloadGroupKeys ?? new Set(groups.map(downloadGroupStorageKey));
@@ -6756,6 +7633,26 @@ function DownloadsPage({
               Retry failed ({failedDownloadCount})
             </button>
           ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              setDownloadsPaused((current) => {
+                const next = !current;
+                void actions.setDownloadsPaused(next);
+                return next;
+              });
+            }}
+          >
+            {downloadsPaused ? <Play size={18} /> : <Pause size={18} />}
+            {downloadsPaused ? "Resume downloads" : "Pause downloads"}
+          </button>
+          {activeDownloadTrackIds.size > 0 ||
+          downloads.some((d) => d.state === "downloading" || d.state === "queued") ? (
+            <button type="button" onClick={() => void actions.cancelAllDownloads()}>
+              <X size={18} />
+              Cancel all
+            </button>
+          ) : null}
           <button type="button" disabled={isExporting} onClick={openExportChooser}>
             {isExporting ? <LoaderCircle className="spin-icon" size={18} /> : <FolderOpen size={18} />}
             {isExporting ? "Exporting..." : "Export local"}
@@ -6892,6 +7789,21 @@ function DownloadsPage({
                         ) : null}
                       </div>
                       <span className="download-row-actions">
+                        {download.state === "downloading" ||
+                        download.state === "queued" ||
+                        isBusy ? (
+                          <button
+                            type="button"
+                            aria-label="Cancel download"
+                            title="Cancel download"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              void actions.cancelDownload(download.trackId);
+                            }}
+                          >
+                            <X size={20} />
+                          </button>
+                        ) : null}
                         {download.state === "failed" ? (
                           <button
                             type="button"
@@ -7479,6 +8391,81 @@ function SettingsPlaceholder({
         {playbackWarning ? (
           <InlineNotice tone="warning" icon={ShieldAlert} message={playbackWarning} />
         ) : null}
+        <div className="eq-control" data-no-page-swipe>
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={preferences.eqEnabled}
+              onChange={(event) =>
+                preferenceActions.setEqPreferences({
+                  enabled: event.target.checked,
+                  bass: preferences.eqBass,
+                  mid: preferences.eqMid,
+                  treble: preferences.eqTreble,
+                  preset: preferences.eqPreset,
+                })
+              }
+            />
+            <span>Equalizer</span>
+          </label>
+          <p className="settings-hint">Three-band EQ (bass / mid / treble). Applied to local and streamed playback.</p>
+          <div className="eq-presets" role="group" aria-label="EQ presets">
+            {Object.keys(EQ_PRESETS).map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                className={preferences.eqPreset === preset ? "is-selected" : ""}
+                onClick={() => {
+                  const gains = EQ_PRESETS[preset];
+                  preferenceActions.setEqPreferences({
+                    enabled: true,
+                    bass: gains.bass,
+                    mid: gains.mid,
+                    treble: gains.treble,
+                    preset,
+                  });
+                }}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
+          {(
+            [
+              ["Bass", "eqBass", preferences.eqBass],
+              ["Mid", "eqMid", preferences.eqMid],
+              ["Treble", "eqTreble", preferences.eqTreble],
+            ] as const
+          ).map(([label, key, value]) => (
+            <label key={key} className="eq-band">
+              <span>
+                {label}
+                <strong>
+                  {value > 0 ? "+" : ""}
+                  {value.toFixed(0)} dB
+                </strong>
+              </span>
+              <input
+                type="range"
+                min={-12}
+                max={12}
+                step={1}
+                value={value}
+                disabled={!preferences.eqEnabled}
+                onChange={(event) => {
+                  const next = Number(event.target.value);
+                  preferenceActions.setEqPreferences({
+                    enabled: preferences.eqEnabled,
+                    bass: key === "eqBass" ? next : preferences.eqBass,
+                    mid: key === "eqMid" ? next : preferences.eqMid,
+                    treble: key === "eqTreble" ? next : preferences.eqTreble,
+                    preset: "custom",
+                  });
+                }}
+              />
+            </label>
+          ))}
+        </div>
       </section>
       <section className="settings-section">
         <h2>Downloads</h2>
@@ -7655,6 +8642,90 @@ function sameDownloadPath(left: string, right: string) {
   }
 
   return normalize(left) === normalize(right);
+}
+
+function VolumeBar({
+  volume,
+  onChange,
+}: {
+  volume: number;
+  onChange: (volume: number) => void;
+}) {
+  const trackRef = useRef<HTMLDivElement | null>(null);
+  const isDraggingRef = useRef(false);
+
+  function volumeFromPointer(clientY: number) {
+    const track = trackRef.current;
+    if (!track) {
+      return volume;
+    }
+    const bounds = track.getBoundingClientRect();
+    if (bounds.height <= 0) {
+      return volume;
+    }
+    const fraction = 1 - (clientY - bounds.top) / bounds.height;
+    return Math.min(1, Math.max(0, fraction));
+  }
+
+  function handlePointerDown(event: ReactPointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+    event.currentTarget.setPointerCapture(event.pointerId);
+    isDraggingRef.current = true;
+    onChange(volumeFromPointer(event.clientY));
+  }
+
+  function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
+    if (isDraggingRef.current) {
+      onChange(volumeFromPointer(event.clientY));
+    }
+  }
+
+  function handlePointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    isDraggingRef.current = false;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowUp" || event.key === "ArrowRight") {
+      event.preventDefault();
+      onChange(Math.min(1, volume + 0.05));
+    } else if (event.key === "ArrowDown" || event.key === "ArrowLeft") {
+      event.preventDefault();
+      onChange(Math.max(0, volume - 0.05));
+    }
+  }
+
+  return (
+    <div
+      className="volume-bar"
+      role="slider"
+      tabIndex={0}
+      aria-label="Volume"
+      aria-orientation="vertical"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(volume * 100)}
+      data-no-page-swipe
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerUp}
+      onKeyDown={handleKeyDown}
+      onWheel={(event) => {
+        // Natural scrolling: fingers up (positive deltaY) raises the volume.
+        onChange(Math.min(1, Math.max(0, volume + (event.deltaY > 0 ? 0.05 : -0.05))));
+      }}
+    >
+      <div className="volume-track" ref={trackRef}>
+        <div className="volume-fill" style={{ height: `${volume * 100}%` }} />
+        <div className="volume-thumb" style={{ bottom: `calc(${volume * 100}% - 6px)` }} />
+      </div>
+    </div>
+  );
 }
 
 const miniPlayerSwipeThresholdPx = 48;

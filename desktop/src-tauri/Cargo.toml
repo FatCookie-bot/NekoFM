@@ -31,3 +31,4 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 url = "2"
 bytes = "1"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
+tokio = { version = "1", features = ["time", "rt"] }

@@ -1,10 +1,14 @@
+mod provider;
+
 use rand::RngCore;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
@@ -16,6 +20,7 @@ const KEYCHAIN_PASSWORD_ACCOUNT: &str = "server_profile.password";
 const PROFILE_FILE_NAME: &str = "server-profile.json";
 const PASSWORD_FALLBACK_FILE_NAME: &str = "server-password.local";
 const PLAYBACK_PREFERENCES_FILE_NAME: &str = "playback-preferences.json";
+const PLAYBACK_SESSION_FILE_NAME: &str = "playback-session.json";
 const DOWNLOADS_FILE_NAME: &str = "downloads.json";
 const LIKED_TRACKS_FILE_NAME: &str = "liked-tracks.json";
 const PLAYLISTS_FILE_NAME: &str = "playlists.json";
@@ -28,6 +33,53 @@ const LIKED_PLAYLIST_NAME: &str = "Liked";
 const DEFAULT_PREVIOUS_TRACK_THRESHOLD_SECONDS: u64 = 3;
 const MIN_PREVIOUS_TRACK_THRESHOLD_SECONDS: u64 = 0;
 const MAX_PREVIOUS_TRACK_THRESHOLD_SECONDS: u64 = 15;
+
+#[derive(Debug, Default)]
+struct DownloadControllerState {
+    paused: AtomicBool,
+    cancel_all: AtomicBool,
+    cancelled_ids: Mutex<HashSet<String>>,
+}
+
+impl DownloadControllerState {
+    fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::SeqCst)
+    }
+
+    fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::SeqCst);
+    }
+
+    fn request_cancel_all(&self) {
+        self.cancel_all.store(true, Ordering::SeqCst);
+    }
+
+    fn clear_cancel_all(&self) {
+        self.cancel_all.store(false, Ordering::SeqCst);
+    }
+
+    fn cancel_track(&self, track_id: &str) {
+        if let Ok(mut set) = self.cancelled_ids.lock() {
+            set.insert(track_id.to_string());
+        }
+    }
+
+    fn clear_track_cancel(&self, track_id: &str) {
+        if let Ok(mut set) = self.cancelled_ids.lock() {
+            set.remove(track_id);
+        }
+    }
+
+    fn is_cancelled(&self, track_id: &str) -> bool {
+        if self.cancel_all.load(Ordering::SeqCst) {
+            return true;
+        }
+        self.cancelled_ids
+            .lock()
+            .map(|set| set.contains(track_id))
+            .unwrap_or(false)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,10 +122,61 @@ struct ServerProfileMetadata {
     remember_password: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PlaybackPreferences {
     previous_track_threshold_seconds: u64,
+    #[serde(default)]
+    eq_enabled: bool,
+    #[serde(default = "default_eq_bass")]
+    eq_bass: f64,
+    #[serde(default = "default_eq_mid")]
+    eq_mid: f64,
+    #[serde(default = "default_eq_treble")]
+    eq_treble: f64,
+    #[serde(default = "default_eq_preset")]
+    eq_preset: String,
+}
+
+fn default_eq_bass() -> f64 {
+    0.0
+}
+fn default_eq_mid() -> f64 {
+    0.0
+}
+fn default_eq_treble() -> f64 {
+    0.0
+}
+fn default_eq_preset() -> String {
+    "flat".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlaybackSession {
+    album: Option<AlbumOutput>,
+    queue: Vec<TrackOutput>,
+    current_index: usize,
+    position_seconds: f64,
+    was_playing: bool,
+    is_shuffle_enabled: bool,
+    skip_unavailable: bool,
+    base_queue_keys: Vec<String>,
+    manual_queue_keys: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadControllerStatus {
+    is_paused: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LibraryCacheSyncResult {
+    album_count: i64,
+    track_count: i64,
+    message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,7 +242,7 @@ struct ExportPlaylistInput {
 }
 
 #[derive(Debug, Clone)]
-struct SavedServerProfile {
+pub(crate) struct SavedServerProfile {
     server_url: String,
     username: String,
     password: String,
@@ -152,7 +255,7 @@ struct SessionProfileState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AlbumOutput {
+pub(crate) struct AlbumOutput {
     id: String,
     name: String,
     artist: String,
@@ -165,7 +268,7 @@ struct AlbumOutput {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct TrackOutput {
+pub(crate) struct TrackOutput {
     id: String,
     title: String,
     artist: String,
@@ -187,7 +290,7 @@ struct AlbumDetailOutput {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LibrarySearchResultOutput {
+pub(crate) struct LibrarySearchResultOutput {
     albums: Vec<AlbumOutput>,
     tracks: Vec<TrackOutput>,
 }
@@ -344,60 +447,17 @@ fn load_server_profile(app: tauri::AppHandle) -> Result<Option<SavedServerProfil
 #[tauri::command]
 async fn get_albums(app: tauri::AppHandle) -> Result<Vec<AlbumOutput>, String> {
     let profile = require_saved_profile(&app)?;
-    let response = get_subsonic(
-        &profile,
-        "getAlbumList2.view",
-        &[
-            ("type", "alphabeticalByName"),
-            ("size", "500"),
-            ("offset", "0"),
-        ],
-    )
-    .await?;
-
-    let albums = response
-        .data
-        .get("albumList2")
-        .and_then(|value| value.get("album"))
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|value| value.as_object())
-                .map(|json| album_from_subsonic(&profile, json))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
+    let albums = provider::fetch_all_albums(&profile).await?;
+    let _ = save_cached_albums(&app, &albums);
     Ok(albums)
 }
 
 #[tauri::command]
 async fn get_album(app: tauri::AppHandle, album_id: String) -> Result<AlbumDetailOutput, String> {
     let profile = require_saved_profile(&app)?;
-    let response = get_subsonic(&profile, "getAlbum.view", &[("id", album_id.as_str())]).await?;
-    let album_json = response
-        .data
-        .get("album")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "The server did not return an album.".to_string())?;
-
-    let tracks = album_json
-        .get("song")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|value| value.as_object())
-                .map(|json| track_from_subsonic(&profile, json))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    Ok(AlbumDetailOutput {
-        album: album_from_subsonic(&profile, album_json),
-        tracks,
-    })
+    let (album, tracks) = provider::fetch_album_detail(&profile, &album_id).await?;
+    let _ = save_cached_album_detail(&app, &album, &tracks);
+    Ok(AlbumDetailOutput { album, tracks })
 }
 
 #[tauri::command]
@@ -413,21 +473,47 @@ async fn search_library(
     }
 
     let profile = require_saved_profile(&app)?;
-    let response = get_subsonic(
-        &profile,
-        "search3.view",
-        &[
-            ("query", query.trim()),
-            ("artistCount", "0"),
-            ("albumCount", "20"),
-            ("songCount", "50"),
-        ],
-    )
-    .await?;
-    Ok(search_result_from_subsonic(
-        &profile,
-        response.data.get("searchResult3"),
-    ))
+    provider::search_library(&profile, query.trim()).await
+}
+
+#[tauri::command]
+fn load_cached_albums(app: tauri::AppHandle) -> Result<Vec<AlbumOutput>, String> {
+    load_cached_albums_from_disk(&app)
+}
+
+#[tauri::command]
+fn load_cached_album(
+    app: tauri::AppHandle,
+    album_id: String,
+) -> Result<Option<AlbumDetailOutput>, String> {
+    load_cached_album_detail_from_disk(&app, &album_id)
+}
+
+/// Background crawl: refresh album list then fetch each album's tracks into the offline cache.
+#[tauri::command]
+async fn sync_library_cache(app: tauri::AppHandle) -> Result<LibraryCacheSyncResult, String> {
+    let profile = require_saved_profile(&app)?;
+    let albums = provider::fetch_all_albums(&profile).await?;
+    save_cached_albums(&app, &albums)?;
+    let mut track_count: i64 = 0;
+    for album in &albums {
+        match provider::fetch_album_detail(&profile, &album.id).await {
+            Ok((detail_album, tracks)) => {
+                track_count += tracks.len() as i64;
+                let _ = save_cached_album_detail(&app, &detail_album, &tracks);
+            }
+            Err(_) => continue,
+        }
+    }
+    Ok(LibraryCacheSyncResult {
+        album_count: albums.len() as i64,
+        track_count,
+        message: format!(
+            "Cached {} albums and {} tracks for offline browse.",
+            albums.len(),
+            track_count
+        ),
+    })
 }
 
 #[tauri::command]
@@ -611,17 +697,79 @@ fn load_liked_tracks(app: tauri::AppHandle) -> Result<Vec<LikedTrackOutput>, Str
     load_liked_tracks_from_disk(&app)
 }
 
+/// Merge local liked cache with server stars. Local-only likes are pushed to the
+/// server; server-only stars are written into the local cache. Server is source
+/// of truth for membership when reachable.
 #[tauri::command]
-fn toggle_liked_track(
+async fn sync_liked_tracks(app: tauri::AppHandle) -> Result<Vec<LikedTrackOutput>, String> {
+    let local = load_liked_tracks_from_disk(&app)?;
+    let profile = match require_saved_profile(&app) {
+        Ok(profile) => profile,
+        Err(_) => return Ok(local),
+    };
+
+    let server_tracks = match provider::fetch_starred_tracks(&profile).await {
+        Ok(tracks) => tracks,
+        Err(_) => return Ok(local),
+    };
+
+    let server_ids: HashSet<String> = server_tracks.iter().map(|t| t.id.clone()).collect();
+    let local_ids: HashSet<String> = local.iter().map(|t| t.track_id.clone()).collect();
+
+    // Push local-only likes up to the server (first-run / offline likes).
+    for liked in &local {
+        if !server_ids.contains(&liked.track_id) {
+            let _ = provider::star_track(&profile, &liked.track_id).await;
+        }
+    }
+
+    // Rebuild cache: server stars first (order preserved), then any local-only
+    // that failed to star still kept at the end.
+    let mut merged: Vec<LikedTrackOutput> = Vec::new();
+    let mut seen = HashSet::new();
+    for (index, track) in server_tracks.iter().enumerate() {
+        seen.insert(track.id.clone());
+        merged.push(liked_track_from_track(track, index as i64));
+    }
+    for liked in &local {
+        if !seen.contains(&liked.track_id) {
+            let position = merged.len() as i64;
+            let mut copy = liked.clone();
+            copy.position = position;
+            merged.push(copy);
+            seen.insert(liked.track_id.clone());
+        }
+    }
+    // Also re-include local-only that are not on server after failed star
+    let _ = local_ids;
+    normalize_liked_positions(&mut merged);
+    save_liked_tracks(&app, &merged)?;
+    Ok(merged)
+}
+
+#[tauri::command]
+async fn toggle_liked_track(
     app: tauri::AppHandle,
     track: TrackOutput,
 ) -> Result<Vec<LikedTrackOutput>, String> {
     let mut tracks = load_liked_tracks_from_disk(&app)?;
-    if tracks.iter().any(|liked| liked.track_id == track.id) {
+    let is_liked = tracks.iter().any(|liked| liked.track_id == track.id);
+
+    if is_liked {
+        if let Ok(profile) = require_saved_profile(&app) {
+            // Best-effort server unstar; still update local cache so offline UI works.
+            let _ = provider::unstar_track(&profile, &track.id).await;
+        }
         tracks.retain(|liked| liked.track_id != track.id);
         normalize_liked_positions(&mut tracks);
         save_liked_tracks(&app, &tracks)?;
         return Ok(tracks);
+    }
+
+    if let Ok(profile) = require_saved_profile(&app) {
+        provider::star_track(&profile, &track.id)
+            .await
+            .map_err(|error| format!("Could not star track on server: {error}"))?;
     }
 
     let next_position = tracks
@@ -637,7 +785,13 @@ fn toggle_liked_track(
 }
 
 #[tauri::command]
-fn unlike_track(app: tauri::AppHandle, track_id: String) -> Result<Vec<LikedTrackOutput>, String> {
+async fn unlike_track(
+    app: tauri::AppHandle,
+    track_id: String,
+) -> Result<Vec<LikedTrackOutput>, String> {
+    if let Ok(profile) = require_saved_profile(&app) {
+        let _ = provider::unstar_track(&profile, &track_id).await;
+    }
     let mut tracks = load_liked_tracks_from_disk(&app)?;
     tracks.retain(|liked| liked.track_id != track_id);
     normalize_liked_positions(&mut tracks);
@@ -1023,6 +1177,18 @@ async fn download_track(
     app: tauri::AppHandle,
     track: TrackOutput,
 ) -> Result<Vec<DownloadedTrackOutput>, String> {
+    let controller = app.state::<DownloadControllerState>();
+    controller.clear_track_cancel(&track.id);
+
+    // Honor global pause before starting work.
+    while controller.is_paused() && !controller.is_cancelled(&track.id) {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    if controller.is_cancelled(&track.id) {
+        controller.clear_track_cancel(&track.id);
+        return repair_downloads(&app);
+    }
+
     let profile = require_saved_profile(&app)?;
     let mut downloads = repair_downloads(&app)?;
 
@@ -1052,10 +1218,23 @@ async fn download_track(
     downloads = upsert_download(downloads, download.clone());
     save_downloads(&app, &downloads)?;
 
+    if controller.is_cancelled(&track.id) {
+        let mut cancelled = downloaded_track_from_track(&track, &local_path, "failed");
+        cancelled.error_message = Some("Download cancelled.".to_string());
+        downloads = upsert_download(downloads, cancelled);
+        save_downloads(&app, &downloads)?;
+        controller.clear_track_cancel(&track.id);
+        return Ok(downloads);
+    }
+
     let partial_path = format!("{local_path}.partial");
     let result = async {
         delete_file_if_present(&partial_path)?;
         let bytes = download_track_bytes(&profile, &track.id).await?;
+        if controller.is_cancelled(&track.id) {
+            delete_file_if_present(&partial_path)?;
+            return Err("Download cancelled.".to_string());
+        }
         if let Some(parent) = PathBuf::from(&local_path).parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
@@ -1076,22 +1255,104 @@ async fn download_track(
     downloads = repair_downloads(&app)?;
     match result {
         Ok(size) => {
-            let mut completed = downloaded_track_from_track(&track, &local_path, "complete");
-            completed.bytes = Some(size);
-            completed.received_bytes = Some(size);
-            completed.total_bytes = Some(size);
-            completed.local_cover_path = ensure_album_cover(&app, &track).await.ok();
-            downloads = upsert_download(downloads, completed);
+            if controller.is_cancelled(&track.id) {
+                let _ = delete_file_if_present(&local_path);
+                let mut cancelled = downloaded_track_from_track(&track, &local_path, "failed");
+                cancelled.error_message = Some("Download cancelled.".to_string());
+                downloads = upsert_download(downloads, cancelled);
+            } else {
+                let mut completed = downloaded_track_from_track(&track, &local_path, "complete");
+                completed.bytes = Some(size);
+                completed.received_bytes = Some(size);
+                completed.total_bytes = Some(size);
+                completed.local_cover_path = ensure_album_cover(&app, &track).await.ok();
+                downloads = upsert_download(downloads, completed);
+            }
         }
         Err(message) => {
-            let mut failed = downloaded_track_from_track(&track, &local_path, "failed");
-            failed.error_message = Some(format!("Download failed: {message}"));
+            let state = if message.contains("cancelled") {
+                "failed"
+            } else {
+                "failed"
+            };
+            let mut failed = downloaded_track_from_track(&track, &local_path, state);
+            failed.error_message = Some(if message.contains("cancelled") {
+                "Download cancelled.".to_string()
+            } else {
+                format!("Download failed: {message}")
+            });
             failed.local_cover_path = ensure_album_cover(&app, &track).await.ok();
             downloads = upsert_download(downloads, failed);
         }
     }
     save_downloads(&app, &downloads)?;
+    controller.clear_track_cancel(&track.id);
     Ok(downloads)
+}
+
+#[tauri::command]
+fn cancel_download(
+    app: tauri::AppHandle,
+    track_id: String,
+) -> Result<Vec<DownloadedTrackOutput>, String> {
+    let controller = app.state::<DownloadControllerState>();
+    controller.cancel_track(&track_id);
+    let mut downloads = repair_downloads(&app)?;
+    if let Some(existing) = downloads
+        .iter()
+        .find(|download| {
+            download.track_id == track_id
+                && (download.state == "downloading" || download.state == "queued")
+        })
+        .cloned()
+    {
+        let mut cancelled = existing;
+        cancelled.state = "failed".to_string();
+        cancelled.error_message = Some("Download cancelled.".to_string());
+        cancelled.updated_at = now_timestamp();
+        let partial = format!("{}.partial", cancelled.local_path);
+        let _ = delete_file_if_present(&partial);
+        downloads = upsert_download(downloads, cancelled);
+        save_downloads(&app, &downloads)?;
+    }
+    Ok(downloads)
+}
+
+#[tauri::command]
+fn cancel_all_downloads(app: tauri::AppHandle) -> Result<Vec<DownloadedTrackOutput>, String> {
+    let controller = app.state::<DownloadControllerState>();
+    controller.request_cancel_all();
+    let mut downloads = repair_downloads(&app)?;
+    let mut changed = false;
+    for download in downloads.iter_mut() {
+        if download.state == "downloading" || download.state == "queued" {
+            download.state = "failed".to_string();
+            download.error_message = Some("Download cancelled.".to_string());
+            download.updated_at = now_timestamp();
+            let partial = format!("{}.partial", download.local_path);
+            let _ = delete_file_if_present(&partial);
+            changed = true;
+        }
+    }
+    if changed {
+        save_downloads(&app, &downloads)?;
+    }
+    // Allow new downloads after the current wave finishes cancelling.
+    controller.clear_cancel_all();
+    Ok(downloads)
+}
+
+#[tauri::command]
+fn set_downloads_paused(app: tauri::AppHandle, paused: bool) -> Result<DownloadControllerStatus, String> {
+    app.state::<DownloadControllerState>().set_paused(paused);
+    Ok(DownloadControllerStatus { is_paused: paused })
+}
+
+#[tauri::command]
+fn get_downloads_paused(app: tauri::AppHandle) -> Result<DownloadControllerStatus, String> {
+    Ok(DownloadControllerStatus {
+        is_paused: app.state::<DownloadControllerState>().is_paused(),
+    })
 }
 
 #[tauri::command]
@@ -1141,11 +1402,70 @@ fn save_previous_track_threshold(
     app: tauri::AppHandle,
     seconds: u64,
 ) -> Result<PlaybackPreferences, String> {
-    let preferences = PlaybackPreferences {
-        previous_track_threshold_seconds: clamp_previous_track_threshold(seconds),
+    let mut preferences = load_playback_preferences_from_disk(&app).unwrap_or_else(|_| {
+        default_playback_preferences()
+    });
+    preferences.previous_track_threshold_seconds = clamp_previous_track_threshold(seconds);
+    save_playback_preferences_to_disk(&app, &preferences)?;
+    Ok(preferences)
+}
+
+#[tauri::command]
+fn save_eq_preferences(
+    app: tauri::AppHandle,
+    enabled: bool,
+    bass: f64,
+    mid: f64,
+    treble: f64,
+    preset: String,
+) -> Result<PlaybackPreferences, String> {
+    let mut preferences = load_playback_preferences_from_disk(&app).unwrap_or_else(|_| {
+        default_playback_preferences()
+    });
+    preferences.eq_enabled = enabled;
+    preferences.eq_bass = clamp_eq_gain(bass);
+    preferences.eq_mid = clamp_eq_gain(mid);
+    preferences.eq_treble = clamp_eq_gain(treble);
+    preferences.eq_preset = if preset.trim().is_empty() {
+        "custom".to_string()
+    } else {
+        preset
     };
     save_playback_preferences_to_disk(&app, &preferences)?;
     Ok(preferences)
+}
+
+#[tauri::command]
+fn save_playback_session(
+    app: tauri::AppHandle,
+    session: PlaybackSession,
+) -> Result<(), String> {
+    let path = playback_session_path(&app)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(&session).map_err(|error| error.to_string())?;
+    fs::write(path, json).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn load_playback_session(app: tauri::AppHandle) -> Result<Option<PlaybackSession>, String> {
+    let path = playback_session_path(&app)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let session = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+    Ok(Some(session))
+}
+
+#[tauri::command]
+fn clear_playback_session(app: tauri::AppHandle) -> Result<(), String> {
+    let path = playback_session_path(&app)?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 async fn test_connection(profile: ServerProfileInput) -> Result<ServerProfileInput, String> {
@@ -1205,7 +1525,7 @@ async fn test_connection(profile: ServerProfileInput) -> Result<ServerProfileInp
     Err("The server rejected the connection.".to_string())
 }
 
-async fn get_subsonic(
+pub(crate) async fn get_subsonic(
     profile: &SavedServerProfile,
     endpoint: &str,
     parameters: &[(&str, &str)],
@@ -1605,6 +1925,36 @@ fn initialize_download_database(connection: &Connection) -> Result<(), String> {
             );
             CREATE INDEX IF NOT EXISTS playlist_tracks_position_idx
               ON playlist_tracks(playlist_id, position);
+
+            CREATE TABLE IF NOT EXISTS cached_albums (
+              id TEXT PRIMARY KEY NOT NULL,
+              name TEXT NOT NULL,
+              artist TEXT NOT NULL,
+              song_count INTEGER NOT NULL,
+              duration_seconds INTEGER NOT NULL,
+              cover_art_id TEXT,
+              cover_art_uri TEXT,
+              year INTEGER,
+              cached_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS cached_albums_artist_idx
+              ON cached_albums(artist, name);
+
+            CREATE TABLE IF NOT EXISTS cached_tracks (
+              id TEXT PRIMARY KEY NOT NULL,
+              album_id TEXT,
+              title TEXT NOT NULL,
+              artist TEXT NOT NULL,
+              track_number INTEGER NOT NULL,
+              duration_seconds INTEGER NOT NULL,
+              album_name TEXT,
+              cover_art_id TEXT,
+              cover_art_uri TEXT,
+              suffix TEXT,
+              cached_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS cached_tracks_album_idx
+              ON cached_tracks(album_id, track_number);
             "#,
         )
         .map_err(|error| error.to_string())
@@ -1703,7 +2053,250 @@ fn save_playback_preferences_to_disk(
 fn default_playback_preferences() -> PlaybackPreferences {
     PlaybackPreferences {
         previous_track_threshold_seconds: DEFAULT_PREVIOUS_TRACK_THRESHOLD_SECONDS,
+        eq_enabled: false,
+        eq_bass: 0.0,
+        eq_mid: 0.0,
+        eq_treble: 0.0,
+        eq_preset: "flat".to_string(),
     }
+}
+
+fn clamp_eq_gain(value: f64) -> f64 {
+    value.clamp(-12.0, 12.0)
+}
+
+fn playback_session_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    let directory = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| error.to_string())?;
+    Ok(directory.join(PLAYBACK_SESSION_FILE_NAME))
+}
+
+fn save_cached_albums(app: &tauri::AppHandle, albums: &[AlbumOutput]) -> Result<(), String> {
+    let mut connection = open_download_database(app)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute("DELETE FROM cached_albums", [])
+        .map_err(|error| error.to_string())?;
+    let cached_at = now_timestamp();
+    {
+        let mut statement = transaction
+            .prepare(
+                r#"
+                INSERT INTO cached_albums (
+                  id, name, artist, song_count, duration_seconds,
+                  cover_art_id, cover_art_uri, year, cached_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+        for album in albums {
+            statement
+                .execute(params![
+                    album.id,
+                    album.name,
+                    album.artist,
+                    album.song_count,
+                    album.duration_seconds,
+                    album.cover_art_id,
+                    album.cover_art_uri,
+                    album.year,
+                    cached_at,
+                ])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn save_cached_album_detail(
+    app: &tauri::AppHandle,
+    album: &AlbumOutput,
+    tracks: &[TrackOutput],
+) -> Result<(), String> {
+    let mut connection = open_download_database(app)?;
+    let transaction = connection
+        .transaction()
+        .map_err(|error| error.to_string())?;
+    let cached_at = now_timestamp();
+    transaction
+        .execute(
+            r#"
+            INSERT INTO cached_albums (
+              id, name, artist, song_count, duration_seconds,
+              cover_art_id, cover_art_uri, year, cached_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            ON CONFLICT(id) DO UPDATE SET
+              name = excluded.name,
+              artist = excluded.artist,
+              song_count = excluded.song_count,
+              duration_seconds = excluded.duration_seconds,
+              cover_art_id = excluded.cover_art_id,
+              cover_art_uri = excluded.cover_art_uri,
+              year = excluded.year,
+              cached_at = excluded.cached_at
+            "#,
+            params![
+                album.id,
+                album.name,
+                album.artist,
+                album.song_count,
+                album.duration_seconds,
+                album.cover_art_id,
+                album.cover_art_uri,
+                album.year,
+                cached_at,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM cached_tracks WHERE album_id = ?1",
+            params![album.id],
+        )
+        .map_err(|error| error.to_string())?;
+    {
+        let mut statement = transaction
+            .prepare(
+                r#"
+                INSERT INTO cached_tracks (
+                  id, album_id, title, artist, track_number, duration_seconds,
+                  album_name, cover_art_id, cover_art_uri, suffix, cached_at
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ON CONFLICT(id) DO UPDATE SET
+                  album_id = excluded.album_id,
+                  title = excluded.title,
+                  artist = excluded.artist,
+                  track_number = excluded.track_number,
+                  duration_seconds = excluded.duration_seconds,
+                  album_name = excluded.album_name,
+                  cover_art_id = excluded.cover_art_id,
+                  cover_art_uri = excluded.cover_art_uri,
+                  suffix = excluded.suffix,
+                  cached_at = excluded.cached_at
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+        for track in tracks {
+            statement
+                .execute(params![
+                    track.id,
+                    track.album_id,
+                    track.title,
+                    track.artist,
+                    track.track_number,
+                    track.duration_seconds,
+                    track.album_name,
+                    track.cover_art_id,
+                    track.cover_art_uri,
+                    track.suffix,
+                    cached_at,
+                ])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())
+}
+
+fn load_cached_albums_from_disk(app: &tauri::AppHandle) -> Result<Vec<AlbumOutput>, String> {
+    let connection = open_download_database(app)?;
+    let mut statement = connection
+        .prepare(
+            r#"
+            SELECT id, name, artist, song_count, duration_seconds,
+              cover_art_id, cover_art_uri, year
+            FROM cached_albums
+            ORDER BY artist COLLATE NOCASE, name COLLATE NOCASE
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let albums = statement
+        .query_map([], |row| {
+            Ok(AlbumOutput {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                artist: row.get(2)?,
+                song_count: row.get(3)?,
+                duration_seconds: row.get(4)?,
+                cover_art_id: row.get(5)?,
+                cover_art_uri: row.get(6)?,
+                year: row.get(7)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(albums)
+}
+
+fn load_cached_album_detail_from_disk(
+    app: &tauri::AppHandle,
+    album_id: &str,
+) -> Result<Option<AlbumDetailOutput>, String> {
+    let connection = open_download_database(app)?;
+    let mut album_statement = connection
+        .prepare(
+            r#"
+            SELECT id, name, artist, song_count, duration_seconds,
+              cover_art_id, cover_art_uri, year
+            FROM cached_albums
+            WHERE id = ?1
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let album = album_statement
+        .query_row(params![album_id], |row| {
+            Ok(AlbumOutput {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                artist: row.get(2)?,
+                song_count: row.get(3)?,
+                duration_seconds: row.get(4)?,
+                cover_art_id: row.get(5)?,
+                cover_art_uri: row.get(6)?,
+                year: row.get(7)?,
+            })
+        })
+        .ok();
+    let Some(album) = album else {
+        return Ok(None);
+    };
+    let mut track_statement = connection
+        .prepare(
+            r#"
+            SELECT id, album_id, title, artist, track_number, duration_seconds,
+              album_name, cover_art_id, cover_art_uri, suffix
+            FROM cached_tracks
+            WHERE album_id = ?1
+            ORDER BY track_number, title
+            "#,
+        )
+        .map_err(|error| error.to_string())?;
+    let tracks = track_statement
+        .query_map(params![album_id], |row| {
+            Ok(TrackOutput {
+                id: row.get(0)?,
+                title: row.get(2)?,
+                artist: row.get(3)?,
+                track_number: row.get(4)?,
+                duration_seconds: row.get(5)?,
+                album_id: row.get(1)?,
+                album_name: row.get(6)?,
+                cover_art_id: row.get(7)?,
+                cover_art_uri: row.get(8)?,
+                suffix: row.get(9)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if tracks.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(AlbumDetailOutput { album, tracks }))
 }
 
 fn clamp_previous_track_threshold(seconds: u64) -> u64 {
@@ -1852,7 +2445,7 @@ fn format_reqwest_error(error: reqwest::Error) -> String {
         .unwrap_or_else(|| format!("Connection failed: {error}"))
 }
 
-fn album_from_subsonic(
+pub(crate) fn album_from_subsonic(
     profile: &SavedServerProfile,
     json: &serde_json::Map<String, Value>,
 ) -> AlbumOutput {
@@ -1869,7 +2462,7 @@ fn album_from_subsonic(
     }
 }
 
-fn track_from_subsonic(
+pub(crate) fn track_from_subsonic(
     profile: &SavedServerProfile,
     json: &serde_json::Map<String, Value>,
 ) -> TrackOutput {
@@ -1888,7 +2481,7 @@ fn track_from_subsonic(
     }
 }
 
-fn search_result_from_subsonic(
+pub(crate) fn search_result_from_subsonic(
     profile: &SavedServerProfile,
     value: Option<&Value>,
 ) -> LibrarySearchResultOutput {
@@ -4147,6 +4740,7 @@ fn server_scan_message(is_scanning: bool, scanned_count: i64) -> String {
 pub fn run() {
     tauri::Builder::default()
         .manage(SessionProfileState::default())
+        .manage(DownloadControllerState::default())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
@@ -4175,8 +4769,16 @@ pub fn run() {
             load_playlist_tracks,
             load_playlists,
             load_server_profile,
+            load_cached_albums,
+            load_cached_album,
+            sync_library_cache,
+            sync_liked_tracks,
             delete_download,
             download_track,
+            cancel_download,
+            cancel_all_downloads,
+            set_downloads_paused,
+            get_downloads_paused,
             export_local_music,
             export_music_selection,
             move_downloads_to_default_folder,
@@ -4189,6 +4791,10 @@ pub fn run() {
             reset_download_folder,
             save_download_folder,
             save_previous_track_threshold,
+            save_eq_preferences,
+            save_playback_session,
+            load_playback_session,
+            clear_playback_session,
             search_downloaded_library,
             search_library,
             cleanup_missing_server_tracks,
